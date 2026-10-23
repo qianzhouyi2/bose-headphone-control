@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag, for example v0.1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Check version
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read package metadata.' }
+          $package = $metadata.packages | Where-Object name -eq 'bose-headphone-control'
+          $version = $package.version
+          $displayVersion = $version -replace '\.0$', ''
+          if ($env:RELEASE_TAG -notin @("v$version", "v$displayVersion")) {
+            throw 'The release tag must match the version in Cargo.toml.'
+          }
+          "version=$displayVersion" >> $env:GITHUB_OUTPUT
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Package
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          $filename = "Bose-Headphone-Control-$env:APP_VERSION-windows-x64.zip"
+          $archive = Join-Path artifacts $filename
+          Compress-Archive -LiteralPath 'target/x86_64-pc-windows-msvc/release/bose-headphone-control.exe', 'LICENSE' -DestinationPath $archive -Force
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $archive))
+          try {
+            $names = @($zip.Entries.FullName | Sort-Object)
+            if (($names -join '|') -ne 'bose-headphone-control.exe|LICENSE') {
+              throw 'The ZIP must contain only the executable and LICENSE at its root.'
+            }
+          } finally { $zip.Dispose() }
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $filename" | Set-Content -LiteralPath artifacts/SHA256SUMS.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: artifacts/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      APP_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-windows-x64
+          path: artifacts
+      - name: Publish release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" artifacts/* --clobber
+          else
+            gh release create "$RELEASE_TAG" artifacts/* \
+              --verify-tag \
+              --title "Bose Headphone Control $APP_VERSION" \
+              --notes "Windows x64 portable build. Extract the ZIP and run bose-headphone-control.exe." \
+              --latest
+          fi

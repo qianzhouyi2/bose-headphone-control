@@ -24,6 +24,8 @@
 
 ## 使用
 
+从 [Releases](../../releases/latest) 下载 Windows x64 压缩包，解压后运行 `bose-headphone-control.exe`。
+
 需要 Windows 10/11、蓝牙适配器，以及已在 Windows 设置中完成配对的耳机。运行 `bose-headphone-control.exe` 后自动连接。
 
 「设备」页面会显示连接状态和播放来源。「断开连接」只会断开蓝牙，不会删除配对记录。

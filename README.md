@@ -24,6 +24,8 @@ Tested with **Bose QuietComfort Ultra Headphones (2nd Gen)**. Other models are u
 
 ## Use
 
+Download the Windows x64 ZIP from [Releases](../../releases/latest), extract it, and run `bose-headphone-control.exe`.
+
 Requires Windows 10/11, a Bluetooth adapter and headphones paired in Windows Settings. Run `bose-headphone-control.exe` to connect.
 
 The Devices page shows connection and playback-source status. **Disconnect** removes the Bluetooth connection without deleting the pairing.

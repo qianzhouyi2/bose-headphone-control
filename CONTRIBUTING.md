@@ -9,6 +9,10 @@ cargo fmt --check
 cargo build --release --locked
 ```
 
+## Release
+
+Push a version tag matching `Cargo.toml` to build and publish a Windows x64 ZIP with GitHub Actions. Version `0.1.0` accepts `v0.1` or `v0.1.0`. The ZIP contains the executable and `LICENSE`; a SHA-256 checksum is published alongside it. An existing tag can also be selected under Actions > Release > Run workflow.
+
 ## Source layout
 
 | Module | Responsibility |
