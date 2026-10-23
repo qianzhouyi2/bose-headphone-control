@@ -24,7 +24,7 @@
 
 ## 使用
 
-从 [Releases](../../releases/latest) 下载 Windows x64 压缩包，解压后运行 `bose-headphone-control.exe`。
+从 [Releases](https://github.com/qianzhouyi2/bose-headphone-control/releases/latest) 下载 Windows x64 压缩包，解压后运行 `bose-headphone-control.exe`。
 
 需要 Windows 10/11、蓝牙适配器，以及已在 Windows 设置中完成配对的耳机。运行 `bose-headphone-control.exe` 后自动连接。
 
