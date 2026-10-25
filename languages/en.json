@@ -47,7 +47,7 @@
     "leAudio.title": "LE Audio",
     "leAudio.description": "Turn LE Audio on or off on your headphones.",
     "favorites.title": "Favorite modes",
-    "favorites.description": "Choose modes to cycle through on your headphones.",
+    "favorites.description": "Choose at least two modes to cycle through on your headphones.",
     "about.firmware": "Firmware",
     "firmware.check": "Check updates",
     "firmware.checking": "Checking…",

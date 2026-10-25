@@ -724,11 +724,13 @@ impl Connection {
             }
             Command::Favorite(id) => {
                 ensure!(*id < 8, "Invalid favorite mode");
-                self.set(
-                    31,
-                    8,
-                    &[self.state.total_modes, 0, self.state.favorites ^ (1 << id)],
-                )?;
+                let selected = self.state.favorites & (1 << id) != 0;
+                let next = self.state.favorites ^ (1 << id);
+                ensure!(
+                    !selected || next.count_ones() >= MIN_FAVORITE_MODES,
+                    "At least two favorite modes are required"
+                );
+                self.set(31, 8, &[self.state.total_modes, 0, next])?;
                 self.state.favorites = self.get(31, 8, 3)?[2];
             }
             Command::ConnectDevice(address) => {

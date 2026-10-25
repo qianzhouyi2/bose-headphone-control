@@ -47,7 +47,7 @@
     "leAudio.title": "LE Audio",
     "leAudio.description": "开启或关闭耳机的 LE Audio 功能。",
     "favorites.title": "收藏聆听模式",
-    "favorites.description": "收藏常用模式，方便在耳机上循环切换。",
+    "favorites.description": "至少收藏两种模式，方便在耳机上循环切换。",
     "about.firmware": "固件版本",
     "firmware.check": "检查更新",
     "firmware.checking": "正在检查…",

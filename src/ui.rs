@@ -175,8 +175,12 @@ fn button(
             Sense::hover()
         },
     );
-    let fill = if selected && enabled {
-        INK
+    let fill = if selected {
+        if enabled {
+            INK
+        } else {
+            Color32::from_rgb(160, 160, 160)
+        }
     } else if response.hovered() && enabled {
         PALE
     } else {
@@ -187,10 +191,10 @@ fn button(
         ui.painter()
             .rect_stroke(r.expand(2.), 5., Stroke::new(1.0_f32, MUTED));
     }
-    let color = if !enabled {
-        MUTED
-    } else if selected {
+    let color = if selected {
         Color32::WHITE
+    } else if !enabled {
+        MUTED
     } else {
         INK
     };
@@ -1824,13 +1828,16 @@ impl Dashboard {
                 sw,
                 if compact { 30. } else { 32. },
             );
+            let selected = self.state.favorites & (1 << id) != 0;
+            let can_toggle = self.state.connected
+                && (!selected || self.state.favorites.count_ones() > MIN_FAVORITE_MODES);
             if button(
                 ui,
                 ("favorite", id),
                 r,
                 &self.mode_name(*id),
-                self.state.favorites & (1 << id) != 0,
-                self.state.connected,
+                selected,
+                can_toggle,
             )
             .clicked()
             {

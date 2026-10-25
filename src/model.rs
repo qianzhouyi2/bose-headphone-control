@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
+pub const MIN_FAVORITE_MODES: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Band {
     pub id: u8,
