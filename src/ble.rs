@@ -16,7 +16,7 @@ thread_local! {
 pub fn set_cancellation(flag: Arc<AtomicBool>) {
     CANCEL.with(|slot| *slot.borrow_mut() = Some(flag));
 }
-fn check_cancelled() -> Result<()> {
+pub(crate) fn check_cancelled() -> Result<()> {
     let cancelled = CANCEL.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -28,14 +28,16 @@ fn check_cancelled() -> Result<()> {
 use windows::{
     core::{RuntimeType, GUID},
     Devices::{
-        Bluetooth::{BluetoothCacheMode, BluetoothLEDevice, GenericAttributeProfile::*},
+        Bluetooth::{
+            BluetoothCacheMode, BluetoothDevice, BluetoothLEDevice, GenericAttributeProfile::*,
+        },
         Enumeration::DeviceInformation,
     },
     Foundation::{AsyncStatus, EventRegistrationToken, IAsyncOperation, TypedEventHandler},
     Storage::Streams::{DataReader, DataWriter},
 };
 
-fn wait<T: RuntimeType>(op: IAsyncOperation<T>, seconds: u64) -> Result<T> {
+pub(crate) fn wait<T: RuntimeType>(op: IAsyncOperation<T>, seconds: u64) -> Result<T> {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     loop {
         if let Err(error) = check_cancelled() {
@@ -56,47 +58,162 @@ fn wait<T: RuntimeType>(op: IAsyncOperation<T>, seconds: u64) -> Result<T> {
         std::thread::sleep(Duration::from_millis(8));
     }
 }
-pub struct Connection {
+struct GattLink {
     device: BluetoothLEDevice,
     service: GattDeviceService,
     session: GattSession,
     characteristic: GattCharacteristic,
     token: EventRegistrationToken,
     rx: mpsc::Receiver<Result<Frame>>,
+}
+
+enum Link {
+    Gatt(GattLink),
+    Rfcomm(crate::rfcomm::RfcommTransport),
+}
+
+impl Link {
+    fn discard_ready(&mut self) -> Result<()> {
+        match self {
+            Self::Gatt(gatt) => {
+                while gatt.rx.try_recv().is_ok() {}
+                Ok(())
+            }
+            Self::Rfcomm(rfcomm) => rfcomm.discard_ready(),
+        }
+    }
+
+    fn send(&mut self, packet: &[u8]) -> Result<()> {
+        match self {
+            Self::Gatt(gatt) => {
+                for segment in encode(packet, gatt.session.MaxPduSize()? as usize)? {
+                    let writer = DataWriter::new()?;
+                    writer.WriteBytes(&segment)?;
+                    let result = wait(
+                        gatt.characteristic.WriteValueWithResultAndOptionAsync(
+                            &writer.DetachBuffer()?,
+                            GattWriteOption::WriteWithResponse,
+                        )?,
+                        4,
+                    )?;
+                    ensure!(
+                        result.Status()? == GattCommunicationStatus::Success,
+                        "Bluetooth write failed: {:?}",
+                        result.Status()?
+                    );
+                }
+                Ok(())
+            }
+            Self::Rfcomm(rfcomm) => rfcomm.send(packet),
+        }
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Option<Frame>> {
+        match self {
+            Self::Gatt(gatt) => match gatt.rx.recv_timeout(timeout) {
+                Ok(Ok(frame)) => Ok(Some(frame)),
+                Ok(Err(error)) => Err(error),
+                Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+                Err(_) => bail!("Headphone connection closed"),
+            },
+            Self::Rfcomm(rfcomm) => rfcomm.recv_frame(timeout),
+        }
+    }
+}
+
+impl Drop for GattLink {
+    fn drop(&mut self) {
+        let _ = self.characteristic.RemoveValueChanged(self.token);
+        if let Ok(op) = self
+            .characteristic
+            .WriteClientCharacteristicConfigurationDescriptorAsync(
+                GattClientCharacteristicConfigurationDescriptorValue::None,
+            )
+        {
+            let _ = wait(op, 2);
+        }
+        let _ = self.session.SetMaintainConnection(false);
+        let _ = self.session.Close();
+        let _ = self.service.Close();
+        let _ = self.device.Close();
+    }
+}
+
+pub struct Connection {
+    link: Link,
+    output: Option<crate::audio::OutputMonitor>,
     pub state: State,
 }
 impl Connection {
     pub fn connect(address: Option<u64>) -> Result<(Self, u64)> {
-        let device = if let Some(address) = address {
-            wait(BluetoothLEDevice::FromBluetoothAddressAsync(address)?, 10)?
-        } else {
-            let selector = BluetoothLEDevice::GetDeviceSelectorFromPairingState(true)?;
-            let devices = wait(DeviceInformation::FindAllAsyncAqsFilter(&selector)?, 10)?;
-            let mut found = None;
-            for info in devices {
-                if info.Name()?.to_string().to_lowercase().starts_with("bose") {
-                    found = Some(wait(BluetoothLEDevice::FromIdAsync(&info.Id()?)?, 10)?);
-                    break;
-                }
+        let address = Self::find_address(address)?;
+        let mut connection = match Self::connect_gatt(address) {
+            Ok(connection) => connection,
+            Err(gatt_error) => {
+                check_cancelled()?;
+                Self::connect_rfcomm(address).map_err(|rfcomm_error| {
+                    anyhow!(
+                        "BLE/GATT failed ({gatt_error:#}); RFCOMM fallback failed ({rfcomm_error:#})"
+                    )
+                })?
             }
-            found.ok_or_else(|| anyhow!("No paired Bose headphones found"))?
         };
-        let address = device.BluetoothAddress()?;
-        let services = wait(
+        connection.output = crate::audio::OutputMonitor::new(address).ok();
+        connection.update_output();
+        Ok((connection, address))
+    }
+
+    fn find_address(address: Option<u64>) -> Result<u64> {
+        if let Some(address) = address {
+            return Ok(address);
+        }
+        let selector = BluetoothLEDevice::GetDeviceSelectorFromPairingState(true)?;
+        let devices = wait(DeviceInformation::FindAllAsyncAqsFilter(&selector)?, 10)?;
+        for info in devices {
+            if info.Name()?.to_string().to_lowercase().starts_with("bose") {
+                let device = wait(BluetoothLEDevice::FromIdAsync(&info.Id()?)?, 10)?;
+                let address = device.BluetoothAddress()?;
+                let _ = device.Close();
+                return Ok(address);
+            }
+        }
+
+        let selector = BluetoothDevice::GetDeviceSelectorFromPairingState(true)?;
+        let devices = wait(DeviceInformation::FindAllAsyncAqsFilter(&selector)?, 10)?;
+        for info in devices {
+            if info.Name()?.to_string().to_lowercase().starts_with("bose") {
+                let device = wait(BluetoothDevice::FromIdAsync(&info.Id()?)?, 10)?;
+                let address = device.BluetoothAddress()?;
+                let _ = device.Close();
+                return Ok(address);
+            }
+        }
+        Err(anyhow!("No paired Bose headphones found"))
+    }
+
+    fn connect_gatt(address: u64) -> Result<Self> {
+        let device = wait(BluetoothLEDevice::FromBluetoothAddressAsync(address)?, 10)?;
+        let services = match wait(
             device.GetGattServicesForUuidWithCacheModeAsync(
                 GUID::from_u128(0x0000febe_0000_1000_8000_00805f9b34fb),
-                BluetoothCacheMode::Uncached,
+                BluetoothCacheMode::Cached,
             )?,
             10,
-        )?;
-        ensure!(
-            services.Status()? == GattCommunicationStatus::Success,
-            "Bluetooth services unavailable"
-        );
+        ) {
+            Ok(services) => services,
+            Err(error) => {
+                let _ = device.Close();
+                return Err(error);
+            }
+        };
+        if services.Status()? != GattCommunicationStatus::Success {
+            let _ = device.Close();
+            bail!("Bluetooth services unavailable");
+        }
         let mut chosen = None;
         for service in services.Services()? {
             let result = wait(
-                service.GetCharacteristicsWithCacheModeAsync(BluetoothCacheMode::Uncached)?,
+                service.GetCharacteristicsWithCacheModeAsync(BluetoothCacheMode::Cached)?,
                 8,
             )?;
             if result.Status()? == GattCommunicationStatus::Success {
@@ -170,12 +287,15 @@ impl Connection {
         }
         let name = device.Name()?.to_string();
         let mut conn = Self {
-            device,
-            service,
-            session,
-            characteristic,
-            token,
-            rx,
+            output: None,
+            link: Link::Gatt(GattLink {
+                device,
+                service,
+                session,
+                characteristic,
+                token,
+                rx,
+            }),
             state: State {
                 name,
                 transport: "Bluetooth LE".into(),
@@ -185,7 +305,23 @@ impl Connection {
         conn.initialize()?;
         conn.read_initial()?;
         conn.state.connected = true;
-        Ok((conn, address))
+        Ok(conn)
+    }
+
+    fn connect_rfcomm(address: u64) -> Result<Self> {
+        let mut conn = Self {
+            output: None,
+            link: Link::Rfcomm(crate::rfcomm::RfcommTransport::connect(address, 2)?),
+            state: State {
+                name: "Bose headphones".into(),
+                transport: "RFCOMM".into(),
+                ..State::default()
+            },
+        };
+        conn.initialize()?;
+        conn.read_initial()?;
+        conn.state.connected = true;
+        Ok(conn)
     }
     fn request(
         &mut self,
@@ -207,25 +343,9 @@ impl Connection {
         timeout: Duration,
     ) -> Result<Vec<Frame>> {
         check_cancelled()?;
-        // Discard complete unsolicited frames only; decoders retain partial bytes.
-        while self.rx.try_recv().is_ok() {}
+        self.link.discard_ready()?;
         let p = packet(block, function, op, payload)?;
-        for segment in encode(&p, self.session.MaxPduSize()? as usize)? {
-            let writer = DataWriter::new()?;
-            writer.WriteBytes(&segment)?;
-            let r = wait(
-                self.characteristic.WriteValueWithResultAndOptionAsync(
-                    &writer.DetachBuffer()?,
-                    GattWriteOption::WriteWithResponse,
-                )?,
-                4,
-            )?;
-            ensure!(
-                r.Status()? == GattCommunicationStatus::Success,
-                "Bluetooth write failed: {:?}",
-                r.Status()?
-            );
-        }
+        self.link.send(&p)?;
         let mut result = vec![];
         let mut deadline = Instant::now() + timeout;
         loop {
@@ -237,8 +357,8 @@ impl Connection {
                 }
                 bail!("Headphones did not complete [{block}.{function}]");
             }
-            match self.rx.recv_timeout(remain.min(Duration::from_millis(50))) {
-                Ok(Ok(f)) => {
+            match self.link.recv(remain.min(Duration::from_millis(50)))? {
+                Some(f) => {
                     let matching =
                         f.block == block && (f.function == function || (drain && f.function == 6));
                     if !matching || f.op == 7 {
@@ -263,9 +383,7 @@ impl Connection {
                     }
                     deadline = Instant::now() + Duration::from_millis(350);
                 }
-                Ok(Err(e)) => return Err(e),
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(_) => bail!("Headphone connection timed out [{block}.{function}]"),
+                None => continue,
             }
         }
     }
@@ -282,6 +400,20 @@ impl Connection {
         status(r, 0)?;
         Ok(())
     }
+    fn confirm(&mut self, mut read: impl FnMut(&mut Self) -> Result<bool>) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if read(self)? {
+                return Ok(());
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "Headphones did not confirm the setting"
+            );
+            check_cancelled()?;
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
     fn initialize(&mut self) -> Result<()> {
         self.state.protocol = String::from_utf8_lossy(&self.get(0, 1, 1)?)
             .trim_end_matches(char::from(0))
@@ -289,6 +421,21 @@ impl Connection {
         let blocks = self.get(0, 2, 1)?;
         let product = self.get(0, 3, 3)?;
         ensure!(product.len() >= 3, "Incomplete product identity");
+        self.state.product_id = Some(u16::from_be_bytes([product[0], product[1]]));
+        if let Ok(guid) = self.get(0, 12, 16) {
+            if guid.len() == 16 {
+                self.state.product_guid = guid
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        format!(
+                            "{}{b:02x}",
+                            if [4, 6, 8, 10].contains(&i) { "-" } else { "" }
+                        )
+                    })
+                    .collect();
+            }
+        }
         let supported: BTreeSet<usize> = blocks
             .iter()
             .rev()
@@ -328,7 +475,18 @@ impl Connection {
         self.state.eq = parse_eq(&self.get(1, 7, 4)?)?;
         Ok(())
     }
+    fn read_multipoint(&mut self) -> Result<()> {
+        let flags = self.get(1, 10, 1)?[0];
+        self.state.multipoint = (flags & 2 != 0).then_some(flags & 1 != 0);
+        Ok(())
+    }
     fn write_audio(&mut self) -> Result<()> {
+        let expected = (
+            self.state.cnc,
+            self.state.spatial,
+            self.state.wind,
+            self.state.anc,
+        );
         self.set(
             31,
             10,
@@ -340,7 +498,15 @@ impl Connection {
                 self.state.anc as u8,
             ],
         )?;
-        self.audio()
+        self.confirm(|conn| {
+            conn.audio()?;
+            Ok((
+                conn.state.cnc,
+                conn.state.spatial,
+                conn.state.wind,
+                conn.state.anc,
+            ) == expected)
+        })
     }
     fn read_initial(&mut self) -> Result<()> {
         let p = self.get(1, 2, 2)?;
@@ -352,7 +518,6 @@ impl Connection {
             .into();
         self.eq()?;
         self.state.sidetone = self.get(1, 11, 2).ok().map(|p| p[1]);
-        self.state.multipoint = self.get(1, 10, 1).ok().map(|p| p[0] & 2 != 0);
         self.state.pause = self.get(1, 24, 1).ok().map(|p| p[0] != 0);
         self.state.answer = self.get(1, 27, 1).ok().map(|p| p[0] != 0);
         if let Ok(p) = self.get(31, 8, 3) {
@@ -385,7 +550,20 @@ impl Connection {
         self.state.mode = self.get(31, 3, 1)?[0];
         self.audio()?;
         self.state.charging = self.get(2, 3, 1).ok().map(|p| p[0] != 0);
+        let _ = self.read_multipoint();
+        if let Ok(p) = self.get(1, 37, 1) {
+            self.state.le_audio = Some(p[0] & 1 != 0);
+        }
         self.eq()?;
+        if self.state.pause.is_some() {
+            self.state.pause = Some(self.get(1, 24, 1)?[0] != 0);
+        }
+        if self.state.answer.is_some() {
+            self.state.answer = Some(self.get(1, 27, 1)?[0] != 0);
+        }
+        if self.state.sidetone.is_some() {
+            self.state.sidetone = Some(self.get(1, 11, 2)?[1]);
+        }
         self.refresh_devices()?;
         Ok(())
     }
@@ -407,12 +585,22 @@ impl Connection {
             Err(error) if error.downcast_ref::<DeviceRejected>().is_some() => None,
             Err(error) => return Err(error),
         };
+        self.update_output();
         Ok(())
+    }
+    fn update_output(&mut self) {
+        if self
+            .output
+            .as_mut()
+            .is_some_and(|output| output.is_playing(self.state.active.as_deref()))
+        {
+            self.state.playback = Some(Playback::Playing);
+        }
     }
     fn refresh_devices(&mut self) -> Result<()> {
         let p = self.get(4, 4, 1)?;
         let mut devices = vec![];
-        for bytes in p[1..].chunks_exact(6) {
+        for bytes in p[1..].as_chunks::<6>().0 {
             if bytes.iter().all(|b| *b == 0) {
                 continue;
             }
@@ -450,26 +638,36 @@ impl Connection {
                         .ok_or_else(|| anyhow!("Unknown EQ band"))?;
                     ensure!((b.min..=b.max).contains(&edit.value), "Invalid EQ value");
                     self.set(1, 7, &[edit.value as i8 as u8, id])?;
-                    self.eq()?;
-                    return Ok(Some(
-                        self.state
+                    self.confirm(|conn| {
+                        conn.eq()?;
+                        Ok(conn
+                            .state
                             .eq
                             .iter()
-                            .find(|b| b.id == id)
-                            .ok_or_else(|| anyhow!("Missing EQ confirmation"))?
-                            .value,
-                    ));
+                            .any(|b| b.id == id && b.value == edit.value))
+                    })?;
+                    return Ok(Some(edit.value));
                 }
             },
             Command::ResetEq(_) => {
                 for b in self.state.eq.clone() {
                     self.set(1, 7, &[0i32.clamp(b.min, b.max) as i8 as u8, b.id])?;
                 }
-                self.eq()?;
+                self.confirm(|conn| {
+                    conn.eq()?;
+                    Ok(conn
+                        .state
+                        .eq
+                        .iter()
+                        .all(|b| b.value == 0i32.clamp(b.min, b.max)))
+                })?;
             }
             Command::Mode(mode) => {
                 self.start(31, 3, &[*mode, 0])?;
-                self.state.mode = self.get(31, 3, 1)?[0];
+                self.confirm(|conn| {
+                    conn.state.mode = conn.get(31, 3, 1)?[0];
+                    Ok(conn.state.mode == *mode)
+                })?;
                 self.audio()?;
             }
             Command::Spatial(v) => {
@@ -482,23 +680,47 @@ impl Connection {
                 self.state.wind = *v;
                 self.write_audio()?;
             }
-            Command::Multipoint(v) => {
-                self.set(1, 10, &[*v as u8])?;
-                self.state.multipoint = Some(self.get(1, 10, 1)?[0] & 2 != 0);
-                self.refresh_devices()?;
-            }
+            Command::Connectivity {
+                setting, enabled, ..
+            } => match setting {
+                ConnectivitySetting::Multipoint => {
+                    self.set(1, 10, &[*enabled as u8])?;
+                    self.confirm(|conn| {
+                        conn.read_multipoint()?;
+                        Ok(conn.state.multipoint == Some(*enabled))
+                    })?;
+                    self.refresh_devices()?;
+                }
+                ConnectivitySetting::LeAudio => {
+                    self.set(1, 37, &[*enabled as u8])?;
+                    self.confirm(|conn| {
+                        conn.state.le_audio = Some(conn.get(1, 37, 1)?[0] & 1 != 0);
+                        Ok(conn.state.le_audio == Some(*enabled))
+                    })?;
+                    let _ = self.read_multipoint();
+                }
+            },
             Command::Pause(v) => {
                 self.set(1, 24, &[*v as u8])?;
-                self.state.pause = Some(self.get(1, 24, 1)?[0] != 0);
+                self.confirm(|conn| {
+                    conn.state.pause = Some(conn.get(1, 24, 1)?[0] != 0);
+                    Ok(conn.state.pause == Some(*v))
+                })?;
             }
             Command::Answer(v) => {
                 self.set(1, 27, &[*v as u8])?;
-                self.state.answer = Some(self.get(1, 27, 1)?[0] != 0);
+                self.confirm(|conn| {
+                    conn.state.answer = Some(conn.get(1, 27, 1)?[0] != 0);
+                    Ok(conn.state.answer == Some(*v))
+                })?;
             }
             Command::Sidetone(v) => {
                 ensure!(*v <= 3, "Invalid sidetone");
                 self.set(1, 11, &[1, *v])?;
-                self.state.sidetone = Some(self.get(1, 11, 2)?[1]);
+                self.confirm(|conn| {
+                    conn.state.sidetone = Some(conn.get(1, 11, 2)?[1]);
+                    Ok(conn.state.sidetone == Some(*v))
+                })?;
             }
             Command::Favorite(id) => {
                 ensure!(*id < 8, "Invalid favorite mode");
@@ -563,23 +785,5 @@ impl Connection {
             _ => {}
         }
         Ok(None)
-    }
-}
-
-impl Drop for Connection {
-    fn drop(&mut self) {
-        let _ = self.characteristic.RemoveValueChanged(self.token);
-        if let Ok(op) = self
-            .characteristic
-            .WriteClientCharacteristicConfigurationDescriptorAsync(
-                GattClientCharacteristicConfigurationDescriptorValue::None,
-            )
-        {
-            let _ = wait(op, 2);
-        }
-        let _ = self.session.SetMaintainConnection(false);
-        let _ = self.session.Close();
-        let _ = self.service.Close();
-        let _ = self.device.Close();
     }
 }

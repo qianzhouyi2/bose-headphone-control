@@ -129,8 +129,13 @@ pub fn status(frame: Frame, min: usize) -> Result<Vec<u8>> {
     Ok(frame.payload)
 }
 pub fn parse_eq(p: &[u8]) -> Result<Vec<crate::model::Band>> {
-    ensure!(!p.is_empty() && p.len() % 4 == 0, "Invalid EQ response");
-    p.chunks_exact(4)
+    let (bands, remainder) = p.as_chunks::<4>();
+    ensure!(
+        !bands.is_empty() && remainder.is_empty(),
+        "Invalid EQ response"
+    );
+    bands
+        .iter()
         .map(|b| {
             let (min, max, value) = (b[0] as i8 as i32, b[1] as i8 as i32, b[2] as i8 as i32);
             ensure!(min <= value && value <= max, "Invalid EQ range");

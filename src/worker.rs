@@ -10,11 +10,18 @@ use std::{
 #[derive(Clone)]
 pub struct Sender(pub Arc<(Mutex<Queue>, Condvar)>);
 impl Sender {
-    pub fn send(&self, c: Command, immediate: bool) {
+    pub fn send(&self, c: Command, immediate: bool) -> bool {
         let (lock, cv) = &*self.0;
         let mut q = lock.lock().unwrap();
+        if q.stopped || matches!(c, Command::Reconnect) && q.connecting {
+            return false;
+        }
+        if matches!(c, Command::Reconnect) {
+            q.connecting = true;
+        }
         q.push(c, Instant::now(), immediate);
         cv.notify_one();
+        true
     }
     pub fn stop(&self) {
         let (lock, cv) = &*self.0;
@@ -64,7 +71,7 @@ impl Worker {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_worker = cancel.clone();
         let thread = std::thread::spawn(move || {
-            crate::ble::set_cancellation(cancel_worker);
+            crate::ble::set_cancellation(cancel_worker.clone());
             unsafe {
                 let _ = windows::Win32::System::Com::CoInitializeEx(
                     None,
@@ -100,12 +107,25 @@ impl Worker {
                 }
                 if let Some(Command::Reconnect) = command {
                     connection = None;
+                    address = None;
+                    failures = 0;
                     suspended = false;
                     retry = Instant::now();
                     pair.0.lock().unwrap().clear_device_edits();
                 }
                 if connection.is_none() && !suspended && Instant::now() >= retry {
-                    match Connection::connect(address) {
+                    {
+                        let mut queue = pair.0.lock().unwrap();
+                        queue.connecting = true;
+                        queue
+                            .commands
+                            .retain(|(command, _)| !matches!(command, Command::Reconnect));
+                    }
+                    let _ = tx.send(Event::Connecting);
+                    ctx.request_repaint();
+                    let result = Connection::connect(address);
+                    pair.0.lock().unwrap().connecting = false;
+                    match result {
                         Ok((conn, addr)) => {
                             address = Some(addr);
                             log(&format!("Bluetooth connected: {}", conn.state.name));
@@ -116,12 +136,15 @@ impl Worker {
                             failures = 0;
                         }
                         Err(e) => {
+                            if cancel_worker.load(Ordering::Relaxed) {
+                                break;
+                            }
                             log(&format!("Connect: {e:#}"));
                             let _ = tx.send(Event::Disconnected(e.to_string()));
                             ctx.request_repaint();
                             retry = Instant::now()
                                 + Duration::from_secs((5u64 << failures.min(4)).min(60));
-                            failures += 1;
+                            failures = failures.saturating_add(1);
                         }
                     }
                 }
@@ -129,6 +152,10 @@ impl Worker {
                     if matches!(command, Command::Reconnect) {
                         continue;
                     }
+                    let connectivity_revision = match &command {
+                        Command::Connectivity { revision, .. } => Some(*revision),
+                        _ => None,
+                    };
                     if let Some(conn) = &mut connection {
                         let confirmed_before = conn.state.clone();
                         match conn.execute(&command) {
@@ -167,6 +194,9 @@ impl Worker {
                                 }
                             }
                             Err(e) => {
+                                if cancel_worker.load(Ordering::Relaxed) {
+                                    break;
+                                }
                                 conn.state = confirmed_before;
                                 let rejected = e
                                     .downcast_ref::<crate::protocol::DeviceRejected>()
@@ -232,6 +262,10 @@ impl Worker {
                         }
                         ctx.request_repaint();
                     }
+                    if let Some(revision) = connectivity_revision {
+                        let _ = tx.send(Event::ConnectivityDone(revision));
+                        ctx.request_repaint();
+                    }
                     next_poll = Instant::now() + Duration::from_secs(5);
                     next_source_poll = Instant::now() + Duration::from_secs(1);
                 } else if connection.is_some()
@@ -247,6 +281,9 @@ impl Worker {
                     match result {
                         Ok(()) => publish(&tx, &connection.as_ref().unwrap().state, &ctx),
                         Err(e) => {
+                            if cancel_worker.load(Ordering::Relaxed) {
+                                break;
+                            }
                             log(&format!("Poll: {e:#}"));
                             connection = None;
                             pair.0.lock().unwrap().clear_device_edits();

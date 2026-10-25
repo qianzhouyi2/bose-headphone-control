@@ -17,7 +17,9 @@ Push a version tag matching `Cargo.toml` to build and publish a Windows x64 ZIP 
 
 | Module | Responsibility |
 | --- | --- |
-| `ble` | Windows Bluetooth LE connection, discovery and GATT requests |
+| `ble` | Paired headphone discovery, GATT connection and shared BMAP controls |
+| `rfcomm` | Windows RFCOMM socket connection and BMAP stream framing |
+| `firmware` | Online firmware availability checks and official USB updater entry |
 | `protocol` | BMAP frames and Bluetooth packet segmentation |
 | `model` | Device state, commands, slider drafts and write ordering |
 | `worker` | Connection lifecycle and serialized device operations |

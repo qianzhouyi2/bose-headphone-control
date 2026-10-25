@@ -1,9 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod audio;
 mod ble;
+mod firmware;
 mod localization;
 mod model;
 mod platform;
 mod protocol;
+mod rfcomm;
 mod ui;
 mod worker;
 const APP_NAME: &str = "Bose Headphone Control";

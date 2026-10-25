@@ -9,7 +9,7 @@
 ## 功能
 
 - 聆听模式、降噪、三段均衡器、沉浸式音频和抗风噪。
-- 已配对设备、多点连接、佩戴检测和通话设置。
+- 已配对设备、多点连接、LE Audio 开关、佩戴检测和通话设置。
 - 简体中文和英语，默认跟随系统语言。
 - 托盘打开窗口和退出。
 
@@ -20,23 +20,23 @@
 **Bose QuietComfort Ultra Headphones (2nd Gen) 的固件版本需高于 10.12.12。**
 
 - **手机升级：** 通过 Bose App 查看并更新耳机固件。
-- **电脑联网升级：** 在浏览器打开 [Bose Updater](https://btu.bose.com/)，按提示安装升级程序，用 USB 数据线连接耳机后，按网页提示检查并安装更新。
+- **电脑联网升级：** 蓝牙连接耳机后，可在「关于耳机」中点击「检查更新」联网查询。「USB 更新」会在浏览器打开 [Bose Updater](https://btu.bose.com/)，按提示安装官方升级程序，用 USB 数据线连接耳机后，按网页提示安装更新。
 
 ## 使用
 
-从 [Releases](https://github.com/qianzhouyi2/bose-headphone-control/releases/latest) 下载 Windows x64 压缩包，解压后运行 `bose-headphone-control.exe`。
+从 [Releases](../../releases/latest) 下载 Windows x64 压缩包，解压后运行 `bose-headphone-control.exe`。
 
 需要 Windows 10/11、蓝牙适配器，以及已在 Windows 设置中完成配对的耳机。运行 `bose-headphone-control.exe` 后自动连接。
 
 「设备」页面会显示连接状态和播放来源。「断开连接」只会断开蓝牙，不会删除配对记录。
 
-**电脑蓝牙要求：** 蓝牙适配器及其驱动需要支持 BLE/GATT。耳机能播放音频但应用无法连接时，也请检查电脑厂商提供的蓝牙驱动更新。
+**电脑蓝牙要求：** 应用优先使用 BLE/GATT，无法建立管理连接时会尝试 RFCOMM。蓝牙适配器及其驱动需支持相应连接方式；耳机能播放音频但应用无法连接时，也请检查电脑厂商提供的蓝牙驱动更新。
 
 BLE 管理连接与 LE Audio 是不同功能；本应用不要求开启 Windows 的「LE Audio」选项。
 
 关闭窗口后应用继续在托盘运行。点击托盘图标打开窗口，右键菜单可退出。再次启动应用会打开已有窗口。
 
-在「关于耳机 → 语言」中切换界面语言。设置和日志保存在 `%LOCALAPPDATA%\Quiet Rebellion`，沿用此目录以兼容早期版本。
+在「关于耳机 → 语言」中切换界面语言。设置和日志保存在 `%LOCALAPPDATA%\Bose Headphone Control`。
 
 ## 构建
 
@@ -50,11 +50,15 @@ cargo build --release --locked
 
 ## 已知限制
 
-目前通过低功耗蓝牙连接，不支持 RFCOMM。可用控制功能取决于耳机型号和固件。
+优先通过 BLE/GATT 连接，失败时尝试 RFCOMM。Bose QuietComfort Ultra Headphones (2nd Gen) 使用 RFCOMM 通道 2；其他型号和固件尚未验证。
+
+使用 USB 播放音频时，耳机设置仍需通过蓝牙管理连接读取和控制。USB 固件安装由 Bose 官方升级程序完成。
 
 ## 许可
 
-[MIT](LICENSE)。基于 Quiet Rebellion 客户端和 [aaronsb/bosectl](https://github.com/aaronsb/bosectl) 的协议工作，保留原始许可声明。
+[MIT](LICENSE)。项目包含基于 [aaronsb/bosectl](https://github.com/aaronsb/bosectl) 的协议兼容工作，并保留所需的原始许可声明。
+
+致谢：本项目基于早期 Quiet Rebellion 客户端继续开发。
 
 Bose 为其权利人的商标。本项目为非官方项目，与 Bose Corporation 无隶属关系。
 

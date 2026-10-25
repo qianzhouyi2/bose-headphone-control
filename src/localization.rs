@@ -18,7 +18,8 @@ pub struct Localization {
     pub system: String,
 }
 pub fn data_dir() -> PathBuf {
-    PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()).join("Quiet Rebellion")
+    PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
+        .join("Bose Headphone Control")
 }
 impl Localization {
     pub fn new() -> Self {

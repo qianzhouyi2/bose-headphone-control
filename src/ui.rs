@@ -3,59 +3,104 @@ use crate::{localization::Localization, model::*, worker::Worker};
 use eframe::egui::{epaint::PathShape, *};
 use std::{
     path::PathBuf,
+    sync::mpsc,
     time::{Duration, Instant},
 };
-const INK: Color32 = Color32::from_rgb(30, 32, 40);
-const MUTED: Color32 = Color32::from_rgb(119, 124, 139);
-const ACCENT: Color32 = Color32::from_rgb(55, 119, 255);
-const PALE: Color32 = Color32::from_rgb(237, 240, 255);
-const BG: Color32 = Color32::from_rgb(247, 247, 247);
-const LINE: Color32 = Color32::from_rgb(232, 234, 240);
+const INK: Color32 = Color32::from_rgb(17, 17, 17);
+const MUTED: Color32 = Color32::from_rgb(96, 96, 96);
+const ACCENT: Color32 = INK;
+const PALE: Color32 = Color32::from_rgb(229, 229, 229);
+const BG: Color32 = Color32::from_rgb(243, 243, 243);
+const LINE: Color32 = Color32::from_rgb(221, 221, 221);
 fn mode_columns(width: f32, count: usize) -> usize {
-    (((width - 48.) / 148.).floor() as usize)
+    (((width - 48.) / 112.).floor() as usize)
         .max(1)
         .min(count.max(1))
 }
 struct HomeLayout {
+    split: bool,
+    product: f32,
     cols: usize,
     rows: usize,
     hero: f32,
     noise: f32,
     eq: f32,
-    extra: f32,
 }
 impl HomeLayout {
-    fn new(width: f32, height: f32, count: usize, connected: bool, compact: bool) -> Self {
-        let cols = mode_columns(width, count);
+    fn new(width: f32, height: f32, count: usize, compact: bool) -> Self {
+        let split = width >= 1000.;
+        let product = if split { (width - 24.) * 0.32 } else { 0. };
+        let control_width = if split { width - product - 24. } else { width };
+        let cols = mode_columns(control_width, count);
         let rows = count.div_ceil(cols).max(1);
         let dense = compact && rows > 1;
         let hero = if dense {
-            102.
+            108.
         } else if compact {
-            164.
+            136.
         } else {
-            198.
-        } + if connected { 0. } else { 32. };
+            170.
+        };
         let noise = if dense {
-            158.
+            168.
         } else if compact {
-            162.
+            174.
         } else {
-            184.
-        } + (rows - 1) as f32 * 70.;
-        let eq = if compact { 206. } else { 220. };
-        let extra = (height - hero - noise - eq - 28.).clamp(0., 400.);
+            190.
+        } + (rows - 1) as f32 * 64.;
+        let eq = if dense { 206. } else { 220. };
+        let extra = (height - if split { 0. } else { hero + 14. } - noise - eq - 14.)
+            .clamp(0., if split { 480. } else { 320. });
         Self {
+            split,
+            product,
             cols,
             rows,
-            hero: hero + extra * 0.2,
-            noise: noise + extra * 0.25,
-            eq: eq + extra * 0.55,
-            extra,
+            hero: hero + if split { 0. } else { extra * 0.45 },
+            noise: noise + extra * if split { 0.35 } else { 0.2 },
+            eq: eq + extra * if split { 0.65 } else { 0.35 },
         }
     }
-    fn height(&self) -> f32 {
-        self.hero + self.noise + self.eq + 28.
+}
+struct SettingsLayout {
+    wide: bool,
+    compact: bool,
+    cols: usize,
+    wear: f32,
+    calls: f32,
+    favorites: f32,
+    le_audio: f32,
+    gap: f32,
+}
+impl SettingsLayout {
+    fn new(width: f32, height: f32, count: usize) -> Self {
+        let wide = width >= 700.;
+        let column_width = if wide { (width - 20.) * 0.5 } else { width };
+        let cols = (((column_width - 44.) / 145.).floor() as usize)
+            .max(1)
+            .min(count.max(1));
+        let rows = count.div_ceil(cols).max(1);
+        let favorites = 144. + rows.saturating_sub(1) as f32 * 44.;
+        let relaxed_height = if wide {
+            (224.0_f32 + 16. + 132.).max(favorites + 16. + 112.)
+        } else {
+            200. + 130. + favorites + 92. + 16. * 3.
+        };
+        let compact = height < relaxed_height;
+        Self {
+            wide,
+            compact,
+            cols,
+            wear: if compact { 164. } else { 224. },
+            calls: if compact { 100. } else { 132. },
+            favorites: if compact {
+                116. + rows.saturating_sub(1) as f32 * 34.
+            } else {
+                favorites
+            },
+            le_audio: if compact { 92. } else { 112. },
+            gap: if compact { 10. } else { 16. },
+        }
     }
 }
 fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
@@ -75,8 +120,37 @@ fn txt(ui: &Ui, r: Rect, text: impl Into<String>, size: f32, color: Color32, bol
     ui.painter().galley(r.min, galley, color);
 }
 fn card(ui: &Ui, r: Rect) {
-    ui.painter()
-        .rect_filled(r, 28., Color32::from_rgb(253, 253, 255));
+    ui.painter().rect_filled(r, 8., Color32::WHITE);
+}
+fn navigation(ui: &mut Ui, index: usize, r: Rect, label: &str, selected: bool) -> bool {
+    let response = ui
+        .interact(r, ui.id().with(("nav", index)), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
+    if selected {
+        ui.painter().line_segment(
+            [
+                pos2(r.left() + 16., r.bottom() + 7.),
+                pos2(r.right() - 16., r.bottom() + 7.),
+            ],
+            Stroke::new(2.0_f32, INK),
+        );
+    } else if response.hovered() {
+        ui.painter().rect_filled(r, 4., PALE);
+    }
+    if response.has_focus() {
+        ui.painter()
+            .rect_stroke(r, 4., Stroke::new(1.0_f32, ACCENT));
+    }
+    ui.painter().text(
+        r.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::new(14., FontFamily::Name("semibold".into())),
+        if selected { INK } else { MUTED },
+    );
+    response.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, selected, label));
+    remember_focus(ui, &response);
+    response.clicked()
 }
 fn remember_focus(ui: &Ui, response: &Response) {
     if response.has_focus() {
@@ -101,22 +175,22 @@ fn button(
             Sense::hover()
         },
     );
-    let fill = if selected {
-        PALE
+    let fill = if selected && enabled {
+        INK
     } else if response.hovered() && enabled {
-        Color32::from_rgb(241, 242, 247)
+        PALE
     } else {
-        Color32::from_rgb(248, 249, 252)
+        BG
     };
-    ui.painter().rect_filled(r, 12., fill);
-    if selected || response.has_focus() {
+    ui.painter().rect_filled(r, 4., fill);
+    if response.has_focus() {
         ui.painter()
-            .rect_stroke(r, 12., Stroke::new(1.0_f32, ACCENT));
+            .rect_stroke(r.expand(2.), 5., Stroke::new(1.0_f32, MUTED));
     }
     let color = if !enabled {
         MUTED
     } else if selected {
-        ACCENT
+        Color32::WHITE
     } else {
         INK
     };
@@ -137,7 +211,7 @@ fn primary(ui: &mut Ui, id: &str, r: Rect, label: &str) -> bool {
         r,
         r.height() * 0.5,
         if response.hovered() {
-            Color32::from_rgb(44, 104, 237)
+            Color32::from_rgb(55, 55, 55)
         } else {
             ACCENT
         },
@@ -163,23 +237,20 @@ fn noise_mode(ui: &mut Ui, id: u8, r: Rect, label: &str, selected: bool, enabled
             Sense::hover()
         },
     );
-    let c = pos2(r.center().x, r.top() + 23.);
-    let color = if selected {
-        Color32::WHITE
-    } else {
-        Color32::from_rgb(154, 159, 169)
-    };
+    let radius = if r.height() < 70. { 19. } else { 23. };
+    let c = pos2(r.center().x, r.top() + radius);
+    let color = if selected { Color32::WHITE } else { INK };
     ui.painter().circle_filled(
         c,
-        23.,
+        radius,
         if selected {
             if enabled {
                 ACCENT
             } else {
-                Color32::from_rgb(171, 195, 247)
+                Color32::from_rgb(160, 160, 160)
             }
         } else {
-            Color32::from_rgb(240, 241, 244)
+            BG
         },
     );
     match id {
@@ -229,16 +300,23 @@ fn noise_mode(ui: &mut Ui, id: u8, r: Rect, label: &str, selected: bool, enabled
             );
         }
     }
-    ui.painter().text(
-        pos2(c.x, r.top() + 53.),
-        Align2::CENTER_TOP,
-        label,
+    let color = if selected && enabled { INK } else { MUTED };
+    let mut job = text::LayoutJob::simple(
+        label.into(),
         FontId::proportional(12.),
-        if selected && enabled { INK } else { MUTED },
+        color,
+        r.width() - 8.,
+    );
+    job.wrap.max_rows = 1;
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(
+        pos2(c.x - galley.size().x * 0.5, r.top() + radius * 2. + 8.),
+        galley,
+        color,
     );
     if response.has_focus() {
         ui.painter()
-            .circle_stroke(c, 27., Stroke::new(1.0_f32, ACCENT));
+            .circle_stroke(c, radius + 4., Stroke::new(1.0_f32, ACCENT));
     }
     response
         .widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, enabled, selected, label));
@@ -262,7 +340,7 @@ fn toggle(ui: &mut Ui, id: &str, r: Rect, value: bool, enabled: bool, label: &st
         if value {
             ACCENT
         } else {
-            Color32::from_rgb(212, 216, 225)
+            Color32::from_rgb(204, 204, 204)
         },
     );
     ui.painter().circle_filled(
@@ -290,11 +368,11 @@ fn slider(
     key: SliderKey,
     r: Rect,
     value: &mut i32,
-    min: i32,
-    max: i32,
+    range: std::ops::RangeInclusive<i32>,
     enabled: bool,
     label: &str,
 ) -> (bool, bool) {
+    let (min, max) = (*range.start(), *range.end());
     let response = ui.interact(
         r,
         ui.id().with(("slider", key)),
@@ -305,13 +383,23 @@ fn slider(
         },
     );
     let old = *value;
-    let start = r.left() + 12.;
-    let end = r.right() - 12.;
+    let vertical = r.height() > r.width();
+    let start = if vertical {
+        r.bottom() - 12.
+    } else {
+        r.left() + 12.
+    };
+    let end = if vertical {
+        r.top() + 12.
+    } else {
+        r.right() - 12.
+    };
     if enabled && (response.dragged() || response.clicked() || response.is_pointer_button_down_on())
     {
         if let Some(p) = response.interact_pointer_pos() {
+            let position = if vertical { p.y } else { p.x };
             *value = (min as f32
-                + ((p.x - start) / (end - start)).clamp(0., 1.) * (max - min) as f32)
+                + ((position - start) / (end - start)).clamp(0., 1.) * (max - min) as f32)
                 .round() as i32;
             response.request_focus();
         }
@@ -333,25 +421,32 @@ fn slider(
         });
     }
     let t = (*value - min) as f32 / (max - min).max(1) as f32;
-    let y = r.center().y;
-    let x = lerp(start..=end, t);
+    let point = |value| {
+        if vertical {
+            pos2(r.center().x, value)
+        } else {
+            pos2(value, r.center().y)
+        }
+    };
+    let thumb = point(lerp(start..=end, t));
     ui.painter()
-        .line_segment([pos2(start, y), pos2(end, y)], Stroke::new(5.0_f32, LINE));
+        .line_segment([point(start), point(end)], Stroke::new(3.0_f32, LINE));
     ui.painter().line_segment(
-        [pos2(start, y), pos2(x, y)],
-        Stroke::new(5.0_f32, if enabled { ACCENT } else { MUTED }),
+        [point(start), thumb],
+        Stroke::new(3.0_f32, if enabled { ACCENT } else { MUTED }),
     );
+    if vertical {
+        let zero = point(lerp(start..=end, (-min) as f32 / (max - min).max(1) as f32));
+        ui.painter().line_segment(
+            [zero - vec2(6., 0.), zero + vec2(6., 0.)],
+            Stroke::new(1.0_f32, LINE),
+        );
+    }
     ui.painter()
-        .circle_filled(pos2(x, y + 1.), 10., Color32::from_black_alpha(12));
-    ui.painter().circle_filled(pos2(x, y), 9., Color32::WHITE);
-    ui.painter().circle_stroke(
-        pos2(x, y),
-        9.,
-        Stroke::new(2.0_f32, if enabled { ACCENT } else { MUTED }),
-    );
+        .circle_filled(thumb, 8., if enabled { INK } else { MUTED });
     if response.has_focus() {
         ui.painter().circle_stroke(
-            pos2(x, y),
+            thumb,
             13.,
             Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.45)),
         );
@@ -468,12 +563,23 @@ fn setup(ctx: &Context) {
 
     ctx.set_fonts(fonts);
 
-    let mut style = Style::default();
-    style.visuals = Visuals::light();
+    let mut style = Style {
+        visuals: Visuals::light(),
+        animation_time: 0.,
+        ..Style::default()
+    };
     style.visuals.panel_fill = BG;
     style.visuals.override_text_color = Some(INK);
+    style.visuals.selection.bg_fill = PALE;
+    style.visuals.selection.stroke = Stroke::new(1.0_f32, INK);
+    style.visuals.hyperlink_color = INK;
+    style.visuals.window_fill = Color32::WHITE;
+    style.visuals.window_rounding = Rounding::same(8.);
+    style.visuals.widgets.active.bg_fill = PALE;
+    style.visuals.widgets.active.weak_bg_fill = PALE;
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, INK);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, MUTED);
     style.spacing.item_spacing = vec2(12., 12.);
-    style.animation_time = 0.;
     style
         .text_styles
         .insert(TextStyle::Body, FontId::proportional(14.));
@@ -482,6 +588,19 @@ fn setup(ctx: &Context) {
         .insert(TextStyle::Button, FontId::proportional(14.));
     ctx.set_style(style);
 }
+#[derive(Default)]
+enum FirmwareStatus {
+    #[default]
+    Idle,
+    Checking,
+    Available(String),
+    NoUpdate,
+    Failed,
+}
+
+type FirmwareIdentity = (u16, String, String);
+type FirmwareResult = Result<crate::firmware::FirmwareCheck, ()>;
+
 pub struct Dashboard {
     pub state: State,
     pub drafts: Drafts,
@@ -489,15 +608,21 @@ pub struct Dashboard {
     pub page: usize,
     headphone_texture: TextureHandle,
     worker: Option<Worker>,
+    connecting: bool,
     pub error: Option<(String, Instant)>,
     notice: Option<(String, Instant)>,
     pending_device: Option<(String, DeviceAction)>,
-    scroll: f32,
+    pending_connectivity: Option<u64>,
+    connectivity_revision: u64,
+    devices_page: usize,
     confirm: Option<Command>,
     rename: String,
     quitting: bool,
     tray: Option<crate::platform::Tray>,
     first_frame: bool,
+    firmware_identity: Option<FirmwareIdentity>,
+    firmware_status: FirmwareStatus,
+    firmware_result: Option<mpsc::Receiver<FirmwareResult>>,
 }
 impl Dashboard {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -517,19 +642,84 @@ impl Dashboard {
             page: 0,
             headphone_texture: headphone_texture(&cc.egui_ctx),
             worker: Some(worker),
+            connecting: true,
             error: None,
             notice: None,
             pending_device: None,
-            scroll: 0.,
+            pending_connectivity: None,
+            connectivity_revision: 0,
+            devices_page: 0,
             confirm: None,
             rename: String::new(),
             quitting: false,
             tray,
             first_frame: true,
+            firmware_identity: None,
+            firmware_status: FirmwareStatus::Idle,
+            firmware_result: None,
         }
     }
     fn t(&self, key: &str) -> String {
         self.language.text(key)
+    }
+    fn firmware_identity(&self) -> Option<FirmwareIdentity> {
+        if !self.state.connected
+            || self.state.product_guid.is_empty()
+            || self.state.firmware.is_empty()
+        {
+            return None;
+        }
+        let product_id = self.state.product_id?;
+        if !matches!(product_id, 0x4082 | 0x4066) {
+            return None;
+        }
+        Some((
+            product_id,
+            self.state.product_guid.clone(),
+            self.state.firmware.clone(),
+        ))
+    }
+    fn firmware_events(&mut self) {
+        let identity = self.firmware_identity();
+        if identity != self.firmware_identity {
+            self.firmware_identity = identity;
+            self.firmware_result = None;
+            self.firmware_status = FirmwareStatus::Idle;
+        }
+        if let Some(receiver) = &self.firmware_result {
+            match receiver.try_recv() {
+                Ok(Ok(result)) => {
+                    self.firmware_status = if result.update_available {
+                        FirmwareStatus::Available(result.version)
+                    } else {
+                        FirmwareStatus::NoUpdate
+                    };
+                    self.firmware_result = None;
+                }
+                Ok(Err(())) | Err(mpsc::TryRecvError::Disconnected) => {
+                    self.firmware_status = FirmwareStatus::Failed;
+                    self.firmware_result = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+    fn check_firmware(&mut self, ctx: &Context) {
+        let Some((product_id, guid, version)) = self.firmware_identity() else {
+            return;
+        };
+        if self.firmware_result.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let ctx = ctx.clone();
+        self.firmware_status = FirmwareStatus::Checking;
+        self.firmware_result = Some(receiver);
+        std::thread::spawn(move || {
+            let result = crate::firmware::check(product_id, &guid, &version).map_err(|_| ());
+            let _ = sender.send(result);
+            ctx.request_repaint();
+        });
     }
     fn device_name(&self, address: &str) -> String {
         self.state
@@ -542,6 +732,43 @@ impl Dashboard {
         if let Some(w) = &self.worker {
             w.sender.send(c, true);
         }
+    }
+    fn begin_connection(&mut self) {
+        self.connecting = true;
+        self.state.connected = false;
+        self.state.playback = None;
+        self.drafts.disconnect();
+        self.pending_device = None;
+        self.pending_connectivity = None;
+        self.error = None;
+        self.notice = None;
+    }
+    fn reconnect(&mut self) {
+        if !self.connecting
+            && self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.sender.send(Command::Reconnect, true))
+        {
+            self.begin_connection();
+        }
+    }
+    fn set_connectivity(&mut self, setting: ConnectivitySetting, enabled: bool) {
+        if !self.state.connected
+            || self.worker.is_none()
+            || self.pending_connectivity.is_some()
+            || self.pending_device.is_some()
+        {
+            return;
+        }
+        self.connectivity_revision += 1;
+        let revision = self.connectivity_revision;
+        self.pending_connectivity = Some(revision);
+        self.send(Command::Connectivity {
+            setting,
+            enabled,
+            revision,
+        });
     }
     fn edit(&mut self, key: SliderKey, value: i32, release: bool) {
         let e = self.drafts.edit(key, value);
@@ -587,12 +814,19 @@ impl Dashboard {
     }
     fn apply_event(&mut self, ctx: &Context, e: Event) {
         match e {
+            Event::Connecting => self.begin_connection(),
+            Event::ConnectivityDone(revision) => {
+                if self.pending_connectivity == Some(revision) {
+                    self.pending_connectivity = None;
+                }
+            }
             Event::ResetAck(edits) => {
                 for edit in edits {
                     self.drafts.complete(edit);
                 }
             }
             Event::State(state) => {
+                self.connecting = false;
                 if self.state.connected
                     && state.connected
                     && self.state.active.is_some()
@@ -679,9 +913,11 @@ impl Dashboard {
                 self.error = Some((self.t("error.rejected"), Instant::now()));
             }
             Event::Disconnected(error) => {
+                self.connecting = false;
                 self.state.connected = false;
                 self.state.playback = None;
                 self.pending_device = None;
+                self.pending_connectivity = None;
                 self.drafts.disconnect();
                 if !error.is_empty() {
                     crate::worker::log(&error);
@@ -701,127 +937,79 @@ impl Dashboard {
             .frame(Frame::none().fill(BG))
             .show(ctx, |ui| {
                 let all = ui.max_rect();
-                let compact = all.height() < 730.;
-                let margin = (all.width() * 0.045).clamp(24., 80.);
-                let page_width = all.width() - margin * 2.;
-                let x = all.left() + margin;
-                txt(
-                    ui,
-                    rect(x, 20., 245., 28.),
-                    "Bose Headphone Control",
-                    if all.width() < 900. { 15. } else { 17. },
-                    INK,
-                    true,
+                let compact = all.height() < 760.;
+                let margin = (all.width() * 0.035).clamp(24., 64.);
+                let page_width = (all.width() - margin * 2.).min(1360.);
+                let x = all.center().x - page_width * 0.5;
+                let nav_width = if all.width() < 900. { 106. } else { 118. };
+                let nav_x = x;
+                ui.painter().line_segment(
+                    [pos2(x, 66.), pos2(x + page_width, 66.)],
+                    Stroke::new(1.0_f32, LINE),
                 );
-                let nav_width = if all.width() < 900. { 115. } else { 126. };
-                let nav_x = x + page_width - nav_width * 4.;
                 for (i, key) in ["nav.home", "nav.devices", "nav.settings", "nav.about"]
                     .iter()
                     .enumerate()
                 {
-                    let r = rect(nav_x + i as f32 * nav_width, 14., nav_width - 6., 36.);
-                    if button(ui, ("nav", i), r, &self.t(key), self.page == i, true).clicked() {
+                    let r = rect(nav_x + i as f32 * nav_width, 19., nav_width - 4., 36.);
+                    if navigation(ui, i, r, &self.t(key), self.page == i) {
                         self.page = i;
-                        self.scroll = 0.;
                     }
                 }
-                let top = if self.page == 0 { 66. } else { 126. };
-                let content = rect(x, top, page_width, all.height() - top - 18.);
+                let top = if self.page == 0 { 82. } else { 134. };
+                let content = rect(x, top, page_width, all.height() - top - 20.);
                 if self.page != 0 {
                     let name = ["home", "devices", "settings", "about"][self.page];
                     txt(
                         ui,
-                        rect(x + 4., 73., page_width - 150., 36.),
+                        rect(x + 2., 85., page_width - 150., 36.),
                         self.t(&format!("page.{name}")),
-                        27.,
+                        26.,
                         INK,
                         true,
                     );
-                    if button(
-                        ui,
-                        "reconnect",
-                        rect(x + page_width - 122., 74., 122., 34.),
-                        &self.t("action.reconnect"),
-                        false,
-                        true,
-                    )
-                    .clicked()
+                    if self.connecting {
+                        txt(
+                            ui,
+                            rect(x + page_width - 122., 95., 122., 24.),
+                            self.t("status.readingShort"),
+                            13.,
+                            MUTED,
+                            false,
+                        );
+                    } else if !self.state.connected
+                        && button(
+                            ui,
+                            "reconnect",
+                            rect(x + page_width - 122., 85., 122., 34.),
+                            &self.t("action.reconnect"),
+                            false,
+                            true,
+                        )
+                        .clicked()
                     {
-                        self.drafts.disconnect();
-                        self.pending_device = None;
-                        self.send(Command::Reconnect);
+                        self.reconnect();
                     }
                 }
-                let wide = page_width >= 1240.;
-                let favorite_width = if wide {
-                    (page_width - 20.) * 0.5
-                } else {
-                    page_width
-                };
-                let mode_cols = ((favorite_width - 44.) / 145.).floor().max(1.) as usize;
-                let favorite_rows = self.state.modes.len().div_ceil(mode_cols);
+                let settings = SettingsLayout::new(
+                    page_width,
+                    content.height(),
+                    self.state.modes.keys().filter(|id| **id < 8).count(),
+                );
                 let home = HomeLayout::new(
                     page_width,
                     content.height(),
                     self.state.modes.len(),
-                    self.state.connected,
                     compact,
                 );
-                let required = match self.page {
-                    0 => home.height(),
-                    1 if wide => (74. + self.state.devices.len().max(1) as f32 * 76.).max(216.),
-                    1 => 286. + self.state.devices.len().max(1) as f32 * 76.,
-                    2 if wide => (140. + favorite_rows.saturating_sub(1) as f32 * 44.).max(346.),
-                    2 => {
-                        (if compact { 478. } else { 502. })
-                            + favorite_rows.saturating_sub(1) as f32 * 44.
-                    }
-                    _ if wide => 260.,
-                    _ => 530.,
-                };
-                let max_scroll = (required - content.height()).max(0.);
-                if ui.rect_contains_pointer(content) {
-                    self.scroll =
-                        (self.scroll - ui.input(|i| i.smooth_scroll_delta.y)).clamp(0., max_scroll);
-                }
-                ui.input(|i| {
-                    if i.key_pressed(Key::PageDown) {
-                        self.scroll = (self.scroll + content.height() * 0.8).min(max_scroll);
-                    }
-                    if i.key_pressed(Key::PageUp) {
-                        self.scroll = (self.scroll - content.height() * 0.8).max(0.);
-                    }
-                    if i.modifiers.ctrl && i.key_pressed(Key::Home) {
-                        self.scroll = 0.;
-                    }
-                    if i.modifiers.ctrl && i.key_pressed(Key::End) {
-                        self.scroll = max_scroll;
-                    }
-                });
-                self.scroll = self.scroll.min(max_scroll);
                 let old_clip = ui.clip_rect();
                 ui.set_clip_rect(content.intersect(old_clip));
-                let origin = pos2(x, content.top() - self.scroll);
+                let origin = content.min;
                 match self.page {
                     0 => self.home(ui, origin, page_width, compact, &home),
-                    1 => self.devices(ui, origin, page_width),
-                    2 => self.settings(ui, origin, page_width, compact),
+                    1 => self.devices(ui, origin, page_width, content.height()),
+                    2 => self.settings(ui, origin, page_width, &settings),
                     _ => self.about(ui, origin, page_width),
-                }
-                if ui.input(|i| i.key_pressed(Key::Tab)) {
-                    if let Some(focus) =
-                        ctx.data(|data| data.get_temp::<Rect>(Id::new("page.focus")))
-                    {
-                        if focus.top() < content.top() && focus.bottom() > 60. {
-                            self.scroll =
-                                (self.scroll - (content.top() - focus.top()) - 8.).max(0.);
-                            ctx.request_repaint();
-                        } else if focus.bottom() > content.bottom() {
-                            self.scroll = (self.scroll + focus.bottom() - content.bottom() + 8.)
-                                .min(max_scroll);
-                            ctx.request_repaint();
-                        }
-                    }
                 }
                 ui.set_clip_rect(old_clip);
                 if let Some((error, when)) = &self.error {
@@ -861,80 +1049,139 @@ impl Dashboard {
         let cols = layout.cols;
         let rows = layout.rows;
         let dense = compact && rows > 1;
-        let hero_h = layout.hero;
-        let hero_y = p.y + layout.extra * 0.1;
-        let center = p.x + w * 0.5;
-        let art = if dense {
-            48.
+        let hero_h = if layout.split {
+            layout.noise + layout.eq + 14.
         } else {
-            92. + layout.extra * 0.18
+            layout.hero
         };
-        headphones(
-            ui,
-            &self.headphone_texture,
-            rect(center - art * 0.5, hero_y, art, art),
-        );
-        let art_extra = if dense { 0. } else { art - 92. };
+        let hero_w = if layout.split { layout.product } else { w };
+        let hero = rect(p.x, p.y, hero_w, hero_h);
+        ui.painter()
+            .rect_filled(hero, 8., Color32::from_rgb(232, 232, 230));
+        let art = (hero_h - 20.).min(260.);
         let name = if self.state.name.is_empty() {
             self.t("device.defaultName")
         } else {
             self.state.name.clone()
         };
-        ui.painter().text(
-            pos2(center, hero_y + art_extra + if dense { 52. } else { 102. }),
-            Align2::CENTER_TOP,
+        let text_x = p.x + 28.;
+        let text_width = if layout.split {
+            hero_w - 56.
+        } else {
+            w - art - 84.
+        };
+        let mut job = text::LayoutJob::simple(
             name,
-            FontId::proportional(if dense {
-                24.
-            } else if compact {
-                28.
-            } else {
-                32.
-            }),
+            FontId::new(
+                if layout.split {
+                    24.
+                } else if dense {
+                    20.
+                } else if compact {
+                    24.
+                } else {
+                    28.
+                },
+                FontFamily::Name("semibold".into()),
+            ),
             INK,
+            text_width,
         );
+        job.wrap.max_rows = if layout.split {
+            3
+        } else if dense {
+            1
+        } else {
+            2
+        };
+        let name = ui.painter().layout_job(job);
+        let retry = !self.state.connected && !self.connecting;
+        let block_height = name.size().y + 42. + if retry { 38. } else { 0. };
+        let hero_y = if layout.split {
+            p.y + 28.
+        } else {
+            p.y + ((hero_h - block_height) * 0.5).max(4.)
+        };
+        let status_y = if layout.split {
+            hero.bottom() - 58. - if retry { 38. } else { 0. }
+        } else {
+            hero_y + name.size().y + 12.
+        };
+        let art_box = if layout.split {
+            let top = hero_y + name.size().y + 32.;
+            rect(p.x + 24., top, hero_w - 48., status_y - top - 24.)
+        } else {
+            rect(p.x + w - art - 28., p.y + (hero_h - art) * 0.5, art, art)
+        };
+        headphones(ui, &self.headphone_texture, art_box);
+        ui.painter().galley(pos2(text_x, hero_y), name, INK);
         let status = if self.state.connected {
             self.t("status.connected")
+        } else if self.connecting {
+            self.t("status.reading")
         } else {
-            self.t("status.waiting")
+            self.t("status.disconnected")
         };
-        let status = if let Some(battery) = self.state.battery.filter(|_| self.state.connected) {
-            format!("{status}  ·  {} {battery}%", self.t("battery.label"))
-        } else {
-            status
-        };
-        ui.painter().text(
-            pos2(
-                center,
-                hero_y
-                    + art_extra
-                    + if dense {
-                        86.
-                    } else if compact {
-                        139.
-                    } else {
-                        145.
-                    },
-            ),
-            Align2::CENTER_TOP,
-            status,
-            FontId::proportional(13.),
-            MUTED,
+        let status_text = ui
+            .painter()
+            .layout_no_wrap(status, FontId::proportional(12.), MUTED);
+        let status_width = status_text.size().x + 32.;
+        ui.painter().circle_filled(
+            pos2(text_x + 13., status_y + 14.),
+            3.,
+            if self.state.connected { INK } else { MUTED },
         );
-        if !self.state.connected {
-            let r = rect(
-                center - 128.,
-                hero_y + art_extra + if dense { 111. } else { 164. },
-                256.,
-                if dense { 28. } else { 36. },
+        ui.painter()
+            .galley(pos2(text_x + 23., status_y + 6.), status_text, MUTED);
+        if let Some(battery) = self.state.battery.filter(|_| self.state.connected) {
+            let bx = text_x + status_width + 16.;
+            let br = rect(bx, status_y + 8., 21., 12.);
+            ui.painter()
+                .rect_stroke(br, 3., Stroke::new(1.2_f32, MUTED));
+            ui.painter()
+                .rect_filled(rect(br.right() + 1., br.top() + 4., 2., 4.), 1., MUTED);
+            ui.painter().rect_filled(
+                rect(
+                    br.left() + 3.,
+                    br.top() + 3.,
+                    15. * battery as f32 / 100.,
+                    6.,
+                ),
+                1.,
+                if battery <= 20 {
+                    Color32::from_rgb(198, 136, 54)
+                } else {
+                    MUTED
+                },
             );
-            if primary(ui, "hero.connect", r, &self.t("action.connect")) {
-                self.drafts.disconnect();
-                self.send(Command::Reconnect);
+            let response = ui.interact(
+                rect(bx, status_y, 85., 28.),
+                ui.id().with("battery"),
+                Sense::hover(),
+            );
+            response.on_hover_text(self.t("battery.label"));
+            ui.painter().text(
+                pos2(bx + 31., status_y + 6.),
+                Align2::LEFT_TOP,
+                format!("{battery}%"),
+                FontId::proportional(13.),
+                INK,
+            );
+        }
+        if retry {
+            let r = rect(text_x, status_y + 36., 132., 30.);
+            if primary(ui, "hero.connect", r, &self.t("action.retry")) {
+                self.reconnect();
             }
         }
+        let p = if layout.split {
+            pos2(p.x + hero_w + 24., p.y)
+        } else {
+            pos2(p.x, p.y + hero_h + 14.)
+        };
+        let w = if layout.split { w - hero_w - 24. } else { w };
         let noise_h = layout.noise;
-        let y = p.y + hero_h + 14.;
+        let y = p.y;
         let noise_card = rect(p.x, y, w, noise_h);
         card(ui, noise_card);
         txt(
@@ -945,13 +1192,18 @@ impl Dashboard {
             INK,
             true,
         );
-        let tile = (w - 48.) / cols as f32;
+        let modes_width = (w - 48.).min(cols as f32 * 164.);
+        let modes_x = p.x + (w - modes_width) * 0.5;
+        let tile = modes_width / cols as f32;
         for (i, id) in self.state.modes.clone().keys().enumerate() {
             let r = rect(
-                p.x + 24. + (i % cols) as f32 * tile,
-                y + 42. + layout.extra * 0.1125 + (i / cols) as f32 * 70.,
+                modes_x + (i % cols) as f32 * tile,
+                y + 47.
+                    + (noise_h - 100. - if rows > 1 { rows as f32 * 64. } else { 72. }).max(0.)
+                        * 0.5
+                    + (i / cols) as f32 * 64.,
                 tile,
-                70.,
+                if rows > 1 { 64. } else { 72. },
             );
             if noise_mode(
                 ui,
@@ -964,7 +1216,7 @@ impl Dashboard {
                 self.send(Command::Mode(*id));
             }
         }
-        let sy = y + noise_h - 49.;
+        let sy = y + noise_h - 53.;
         let mut value = self.drafts.value(SliderKey::Cnc, self.state.cnc);
         let r = rect(p.x + 22., sy, w - 44., 27.);
         let (changed, release) = slider(
@@ -972,8 +1224,7 @@ impl Dashboard {
             SliderKey::Cnc,
             r,
             &mut value,
-            0,
-            10,
+            0..=10,
             self.state.connected,
             &self.t("noise.level"),
         );
@@ -1033,9 +1284,10 @@ impl Dashboard {
                 .collect();
             self.send(Command::ResetEq(edits));
         }
-        let gap = if compact { 48. } else { 52. } + layout.extra * 0.275;
+        let bands = self.state.eq.len().max(3);
+        let band_width = (left - 36.) / bands as f32;
         for (i, b) in self.state.eq.clone().iter().enumerate() {
-            let yy = y + 56. + i as f32 * gap;
+            let center = p.x + 18. + (i as f32 + 0.5) * band_width;
             let key = SliderKey::Eq(b.id);
             let mut value = self.drafts.value(key, b.value);
             let name = self.t(match b.id {
@@ -1043,29 +1295,27 @@ impl Dashboard {
                 1 => "term.mid",
                 _ => "term.treble",
             });
-            txt(
-                ui,
-                rect(p.x + 24., yy, left - 48., 20.),
+            ui.painter().text(
+                pos2(center, y + eq_h - 27.),
+                Align2::CENTER_TOP,
                 &name,
-                13.,
+                FontId::proportional(13.),
                 INK,
-                false,
             );
             ui.painter().text(
-                pos2(p.x + left - 24., yy),
-                Align2::RIGHT_TOP,
+                pos2(center, y + 58.),
+                Align2::CENTER_TOP,
                 format!("{value:+} dB"),
                 FontId::proportional(13.),
                 ACCENT,
             );
-            let r = rect(p.x + 18., yy + 18., left - 36., 28.);
+            let r = rect(center - 20., y + 80., 40., eq_h - 118.);
             let (changed, release) = slider(
                 ui,
                 key,
                 r,
                 &mut value,
-                b.min,
-                b.max,
+                b.min..=b.max,
                 self.state.connected,
                 &name,
             );
@@ -1073,7 +1323,17 @@ impl Dashboard {
                 self.edit(key, value, release);
             }
         }
-        if self.state.eq.is_empty() {
+        if self.state.eq.is_empty() && self.connecting {
+            for i in 0..3 {
+                let center = p.x + 18. + (i as f32 + 0.5) * band_width;
+                ui.painter()
+                    .rect_filled(rect(center - 16., y + 62., 32., 8.), 4., LINE);
+                ui.painter().line_segment(
+                    [pos2(center, y + 92.), pos2(center, y + eq_h - 50.)],
+                    Stroke::new(3.0_f32, LINE),
+                );
+            }
+        } else if self.state.eq.is_empty() {
             txt(
                 ui,
                 rect(p.x + 24., y + 74., left - 48., 70.),
@@ -1084,7 +1344,7 @@ impl Dashboard {
             );
         }
         let x = p.x + left + 16.;
-        let sh = if compact { 118. } else { 130. } + layout.extra * 0.286;
+        let sh = eq_h * 0.59;
         let spatial_card = rect(x, y, right, sh);
         card(ui, spatial_card);
         txt(
@@ -1097,7 +1357,7 @@ impl Dashboard {
         );
         txt(
             ui,
-            rect(x + 24., y + 49., right - 48., 30.),
+            rect(x + 24., y + 49., right - 48., 34.),
             self.t("spatial.description"),
             12.,
             MUTED,
@@ -1111,7 +1371,12 @@ impl Dashboard {
             if button(
                 ui,
                 ("spatial", i),
-                rect(x + 24. + i as f32 * (sw + 6.), y + sh - 48., sw, 32.),
+                rect(
+                    x + 24. + i as f32 * (sw + 6.),
+                    y + 82. + (sh - 130.).max(0.) * 0.5,
+                    sw,
+                    32.,
+                ),
                 &self.t(key),
                 self.state.spatial == i as u8,
                 self.state.connected,
@@ -1136,7 +1401,7 @@ impl Dashboard {
         );
         txt(
             ui,
-            rect(x + 24., wind_y + 43., right - 110., 28.),
+            rect(x + 24., wind_y + 43., right - 110., 32.),
             self.t("wind.description"),
             11.,
             MUTED,
@@ -1153,53 +1418,92 @@ impl Dashboard {
             self.send(Command::Wind(!self.state.wind));
         }
     }
-    fn devices(&mut self, ui: &mut Ui, p: Pos2, w: f32) {
-        let wide = w >= 1240.;
-        let origin = p;
-        let full_width = w;
-        let w = if wide { (w - 20.) * 0.42 } else { w };
-        card(ui, rect(p.x, p.y, w, 90.));
+    fn devices(&mut self, ui: &mut Ui, p: Pos2, w: f32, height: f32) {
+        let side = (w - 16.) * 0.35;
+        card(ui, rect(p.x, p.y, side, 150.));
         txt(
             ui,
-            rect(p.x + 22., p.y + 17., w - 110., 26.),
+            rect(p.x + 22., p.y + 20., side - 44., 28.),
             self.t("multi.title"),
-            18.,
+            17.,
             INK,
             true,
         );
         txt(
             ui,
-            rect(p.x + 22., p.y + 50., w - 110., 22.),
+            rect(p.x + 22., p.y + 54., side - 44., 36.),
             self.t("multi.description"),
-            13.,
+            12.,
             MUTED,
             false,
         );
         if toggle(
             ui,
             "multipoint",
-            rect(p.x + w - 70., p.y + 20., 48., 46.),
+            rect(p.x + side - 70., p.y + 94., 48., 40.),
             self.state.multipoint == Some(true),
-            self.state.connected && self.state.multipoint.is_some(),
+            self.state.connected
+                && self.state.multipoint.is_some()
+                && self.pending_connectivity.is_none()
+                && self.pending_device.is_none(),
             &self.t("multi.title"),
         ) {
-            self.send(Command::Multipoint(self.state.multipoint != Some(true)));
+            self.set_connectivity(
+                ConnectivitySetting::Multipoint,
+                self.state.multipoint != Some(true),
+            );
         }
-        let p = if wide { pos2(p.x + w + 20., p.y) } else { p };
-        let w = if wide { full_width - w - 20. } else { w };
-        let y = p.y + if wide { 0. } else { 110. };
+        let pair_y = p.y + 166.;
+        card(ui, rect(p.x, pair_y, side, 182.));
         txt(
             ui,
-            rect(p.x + 4., y, w - 130., 28.),
+            rect(p.x + 22., pair_y + 20., side - 44., 26.),
+            self.t("pair.title"),
+            17.,
+            INK,
+            true,
+        );
+        txt(
+            ui,
+            rect(p.x + 22., pair_y + 54., side - 44., 56.),
+            self.t("pair.description"),
+            12.,
+            MUTED,
+            false,
+        );
+        if button(
+            ui,
+            "pair",
+            rect(p.x + 22., pair_y + 126., side - 44., 36.),
+            &self.t("action.pair"),
+            false,
+            self.state.connected,
+        )
+        .clicked()
+        {
+            self.confirm = Some(Command::Pair);
+        }
+        let p = pos2(p.x + side + 16., p.y);
+        let w = w - side - 16.;
+        let capacity = ((height - 120.) / 78.).floor().max(1.) as usize;
+        let pages = self.state.devices.len().div_ceil(capacity).max(1);
+        self.devices_page = self.devices_page.min(pages - 1);
+        let start = self.devices_page * capacity;
+        let count = self.state.devices.len().saturating_sub(start).min(capacity);
+        let panel_h = 72. + count.max(1) as f32 * 78. + if pages > 1 { 48. } else { 14. };
+        card(ui, rect(p.x, p.y, w, panel_h));
+        txt(
+            ui,
+            rect(p.x + 22., p.y + 23., w - 156., 28.),
             self.t("devices.title"),
-            18.,
+            17.,
             INK,
             true,
         );
         if button(
             ui,
             "refresh",
-            rect(p.x + w - 110., y - 2., 110., 32.),
+            rect(p.x + w - 126., p.y + 18., 104., 32.),
             &self.t("action.refresh"),
             false,
             self.state.connected,
@@ -1208,8 +1512,16 @@ impl Dashboard {
         {
             self.send(Command::Refresh);
         }
-        for (i, d) in self.state.devices.clone().iter().enumerate() {
-            let r = rect(p.x, y + 50. + i as f32 * 76., w, 64.);
+        for (i, d) in self
+            .state
+            .devices
+            .clone()
+            .iter()
+            .skip(start)
+            .take(capacity)
+            .enumerate()
+        {
+            let r = rect(p.x + 12., p.y + 66. + i as f32 * 78., w - 24., 72.);
             let source =
                 self.state.connected && d.connected && self.state.active.as_ref() == Some(&d.mac);
             let active = source
@@ -1217,42 +1529,56 @@ impl Dashboard {
                     self.state.playback,
                     Some(Playback::Playing | Playback::Seeking)
                 );
-            card(ui, r);
-            ui.painter().circle_filled(
-                pos2(r.left() + 31., r.center().y),
-                16.,
-                if active { PALE } else { BG },
-            );
+            if source {
+                ui.painter().rect_filled(r, 4., BG);
+            }
+            let icon = pos2(r.left() + 28., r.center().y);
+            ui.painter()
+                .circle_filled(icon, 19., if active { PALE } else { BG });
             ui.painter().rect_stroke(
-                rect(r.left() + 22., r.top() + 23., 18., 13.),
+                rect(icon.x - 9., icon.y - 7., 18., 13.),
                 3.,
                 Stroke::new(1.5_f32, if active { ACCENT } else { MUTED }),
             );
-            txt(
-                ui,
-                rect(r.left() + 62., r.top() + 11., w - 210., 23.),
-                &d.name,
-                15.,
-                INK,
-                true,
+            ui.painter().line_segment(
+                [
+                    pos2(icon.x - 5., icon.y + 9.),
+                    pos2(icon.x + 5., icon.y + 9.),
+                ],
+                Stroke::new(1.5_f32, if active { ACCENT } else { MUTED }),
             );
+            let mut name = text::LayoutJob::simple(
+                d.name.clone(),
+                FontId::new(14., FontFamily::Name("semibold".into())),
+                INK,
+                r.width() - 202.,
+            );
+            name.wrap.max_rows = 1;
+            let name = ui.painter().layout_job(name);
+            ui.painter()
+                .galley(pos2(r.left() + 58., r.top() + 14.), name, INK);
+            ui.interact(
+                rect(r.left() + 58., r.top() + 10., r.width() - 202., 25.),
+                ui.id().with(("device.name", &d.mac)),
+                Sense::hover(),
+            )
+            .on_hover_text(&d.name);
             txt(
                 ui,
-                rect(r.left() + 62., r.top() + 37., w - 210., 18.),
+                rect(r.left() + 58., r.top() + 41., r.width() - 202., 20.),
                 if source {
-                    self.t(match self.state.playback {
-                        Some(Playback::Playing | Playback::Seeking) => "devices.playing",
-                        Some(Playback::Paused) => "devices.paused",
-                        Some(Playback::Stopped) => "devices.stopped",
-                        None => "devices.active",
+                    self.t(if active {
+                        "devices.playing"
+                    } else {
+                        "devices.active"
                     })
                 } else if d.connected {
                     self.t("status.connected")
                 } else {
                     self.t("status.disconnected")
                 },
-                11.,
-                MUTED,
+                12.,
+                if source { ACCENT } else { MUTED },
                 false,
             );
             let pending = self
@@ -1276,10 +1602,13 @@ impl Dashboard {
             if button(
                 ui,
                 ("source", &d.mac),
-                rect(r.right() - 164., r.top() + 16., 146., 32.),
+                rect(r.right() - 136., r.top() + 20., 124., 32.),
                 &action,
                 false,
-                self.state.connected && self.pending_device.is_none() && (!d.connected || source),
+                self.state.connected
+                    && self.pending_device.is_none()
+                    && self.pending_connectivity.is_none()
+                    && (!d.connected || source),
             )
             .clicked()
             {
@@ -1296,61 +1625,72 @@ impl Dashboard {
                     DeviceAction::Disconnect => Command::DisconnectDevice(d.mac.clone()),
                 });
             }
+            if i + 1 < count {
+                ui.painter().line_segment(
+                    [
+                        pos2(r.left() + 58., r.bottom() + 3.),
+                        pos2(r.right() - 12., r.bottom() + 3.),
+                    ],
+                    Stroke::new(1.0_f32, LINE),
+                );
+            }
         }
         if self.state.devices.is_empty() {
-            card(ui, rect(p.x, y + 50., w, 70.));
             txt(
                 ui,
-                rect(p.x + 22., y + 72., w - 44., 30.),
-                self.t("devices.waiting"),
+                rect(p.x + 22., p.y + 88., w - 44., 44.),
+                self.t(if self.connecting {
+                    "status.readingShort"
+                } else {
+                    "devices.waiting"
+                }),
                 14.,
                 MUTED,
                 false,
             );
         }
-        let y = if wide {
-            origin.y + 110.
-        } else {
-            y + 86. + self.state.devices.len().max(1) as f32 * 76.
-        };
-        let p = if wide { origin } else { p };
-        let w = if wide { (full_width - 20.) * 0.42 } else { w };
-        card(ui, rect(p.x, y, w, 90.));
-        txt(
-            ui,
-            rect(p.x + 22., y + 16., w - 200., 25.),
-            self.t("pair.title"),
-            17.,
-            INK,
-            true,
-        );
-        txt(
-            ui,
-            rect(p.x + 22., y + 49., w - 200., 28.),
-            self.t("pair.description"),
-            12.,
-            MUTED,
-            false,
-        );
-        if button(
-            ui,
-            "pair",
-            rect(p.x + w - 167., y + 28., 145., 36.),
-            &self.t("action.pair"),
-            false,
-            self.state.connected,
-        )
-        .clicked()
-        {
-            self.confirm = Some(Command::Pair);
+        if pages > 1 {
+            let y = p.y + panel_h - 44.;
+            if button(
+                ui,
+                "devices.previous",
+                rect(p.x + 22., y, 40., 30.),
+                "‹",
+                false,
+                self.devices_page > 0,
+            )
+            .clicked()
+            {
+                self.devices_page -= 1;
+            }
+            ui.painter().text(
+                pos2(p.x + w * 0.5, y + 15.),
+                Align2::CENTER_CENTER,
+                format!("{} / {pages}", self.devices_page + 1),
+                FontId::proportional(12.),
+                MUTED,
+            );
+            if button(
+                ui,
+                "devices.next",
+                rect(p.x + w - 62., y, 40., 30.),
+                "›",
+                false,
+                self.devices_page + 1 < pages,
+            )
+            .clicked()
+            {
+                self.devices_page += 1;
+            }
         }
     }
-    fn settings(&mut self, ui: &mut Ui, p: Pos2, w: f32, compact: bool) {
-        let wide = w >= 1240.;
+    fn settings(&mut self, ui: &mut Ui, p: Pos2, w: f32, layout: &SettingsLayout) {
+        let wide = layout.wide;
+        let compact = layout.compact;
         let w = if wide { (w - 20.) * 0.5 } else { w };
-        let wear_h = if compact { 190. } else { 200. };
-        let calls_h = if compact { 120. } else { 130. };
-        let gap = if compact { 14. } else { 16. };
+        let wear_h = layout.wear;
+        let calls_h = layout.calls;
+        let gap = layout.gap;
         card(ui, rect(p.x, p.y, w, wear_h));
         txt(
             ui,
@@ -1369,7 +1709,7 @@ impl Dashboard {
         {
             let y = p.y
                 + if compact {
-                    62. + i as f32 * 62.
+                    50. + i as f32 * 56.
                 } else {
                     66. + i as f32 * 65.
                 };
@@ -1383,7 +1723,12 @@ impl Dashboard {
             );
             txt(
                 ui,
-                rect(p.x + 22., y + 29., w - 110., 26.),
+                rect(
+                    p.x + 22.,
+                    y + if compact { 24. } else { 29. },
+                    w - 110.,
+                    if compact { 22. } else { 26. },
+                ),
                 self.t(desc),
                 12.,
                 MUTED,
@@ -1392,7 +1737,7 @@ impl Dashboard {
             if toggle(
                 ui,
                 key,
-                rect(p.x + w - 70., y, 48., 46.),
+                rect(p.x + w - 70., y, 48., if compact { 42. } else { 46. }),
                 value == Some(true),
                 self.state.connected && value.is_some(),
                 &self.t(key),
@@ -1427,7 +1772,12 @@ impl Dashboard {
             if button(
                 ui,
                 ("sidetone", value),
-                rect(p.x + 22. + i as f32 * (sw + 8.), y + calls_h - 61., sw, 38.),
+                rect(
+                    p.x + 22. + i as f32 * (sw + 8.),
+                    y + calls_h - if compact { 48. } else { 61. },
+                    sw,
+                    if compact { 34. } else { 38. },
+                ),
                 &self.t(key),
                 self.state.sidetone == Some(*value),
                 self.state.connected && self.state.sidetone.is_some(),
@@ -1439,18 +1789,12 @@ impl Dashboard {
         }
         let y = if wide { p.y } else { y + calls_h + gap };
         let p = if wide { pos2(p.x + w + 20., p.y) } else { p };
-        let count = self.state.modes.keys().filter(|id| **id < 8).count();
-        let cols = (((w - 44.) / 145.).floor() as usize)
-            .max(1)
-            .min(count.max(1));
-        let rows = count.div_ceil(cols).max(1);
-        card(
-            ui,
-            rect(p.x, y, w, 140. + rows.saturating_sub(1) as f32 * 44.),
-        );
+        let cols = layout.cols;
+        let favorite_h = layout.favorites;
+        card(ui, rect(p.x, y, w, favorite_h));
         txt(
             ui,
-            rect(p.x + 22., y + 18., w - 44., 28.),
+            rect(p.x + 22., y + if compact { 12. } else { 18. }, w - 44., 28.),
             self.t("favorites.title"),
             18.,
             INK,
@@ -1458,7 +1802,7 @@ impl Dashboard {
         );
         txt(
             ui,
-            rect(p.x + 22., y + 51., w - 44., 24.),
+            rect(p.x + 22., y + if compact { 40. } else { 51. }, w - 44., 24.),
             self.t("favorites.description"),
             12.,
             MUTED,
@@ -1475,9 +1819,10 @@ impl Dashboard {
         for (i, id) in modes.iter().enumerate() {
             let r = rect(
                 p.x + 22. + (i % cols) as f32 * (sw + 8.),
-                y + 87. + (i / cols) as f32 * 44.,
+                y + (if compact { 65. } else { 87. })
+                    + (i / cols) as f32 * if compact { 34. } else { 44. },
                 sw,
-                32.,
+                if compact { 30. } else { 32. },
             );
             if button(
                 ui,
@@ -1492,28 +1837,77 @@ impl Dashboard {
                 self.send(Command::Favorite(*id));
             }
         }
-    }
-    fn about(&mut self, ui: &mut Ui, p: Pos2, w: f32) {
-        let wide = w >= 1240.;
-        let full_width = w;
-        let w = if wide { (w - 20.) * 0.55 } else { w };
-        card(ui, rect(p.x, p.y, w, 258.));
+        let le_audio_y = y + favorite_h + gap;
+        let le_audio_h = layout.le_audio;
+        card(ui, rect(p.x, le_audio_y, w, le_audio_h));
         txt(
             ui,
-            rect(p.x + 22., p.y + 19., w - 150., 30.),
+            rect(
+                p.x + 22.,
+                le_audio_y + if compact { 10. } else { 16. },
+                w - 110.,
+                25.,
+            ),
+            self.t("leAudio.title"),
+            15.,
+            INK,
+            true,
+        );
+        txt(
+            ui,
+            rect(
+                p.x + 22.,
+                le_audio_y + if compact { 36. } else { 47. },
+                w - 110.,
+                28.,
+            ),
+            self.t("leAudio.description"),
+            12.,
+            MUTED,
+            false,
+        );
+        if toggle(
+            ui,
+            "le-audio",
+            rect(
+                p.x + w - 70.,
+                le_audio_y + if compact { 15. } else { 24. },
+                48.,
+                if compact { 42. } else { 46. },
+            ),
+            self.state.le_audio == Some(true),
+            self.state.connected
+                && self.state.le_audio.is_some()
+                && self.pending_connectivity.is_none()
+                && self.pending_device.is_none(),
+            &self.t("leAudio.title"),
+        ) {
+            self.set_connectivity(
+                ConnectivitySetting::LeAudio,
+                self.state.le_audio != Some(true),
+            );
+        }
+    }
+    fn about(&mut self, ui: &mut Ui, p: Pos2, width: f32) {
+        let w = (width - 16.) * 0.55;
+        card(ui, rect(p.x, p.y, w, 420.));
+        let mut title = text::LayoutJob::simple(
             if self.state.name.is_empty() {
                 self.t("device.defaultName")
             } else {
                 self.state.name.clone()
             },
-            20.,
+            FontId::new(20., FontFamily::Name("semibold".into())),
             INK,
-            true,
+            w - 44.,
         );
+        title.wrap.max_rows = 2;
+        let title = ui.painter().layout_job(title);
+        ui.painter().galley(pos2(p.x + 22., p.y + 20.), title, INK);
         if button(
             ui,
             "rename",
-            rect(p.x + w - 104., p.y + 18., 82., 32.),
+            rect(p.x + 22., p.y + 79., 100., 32.),
             &self.t("action.rename"),
             false,
             self.state.connected,
@@ -1523,40 +1917,106 @@ impl Dashboard {
             self.rename = self.state.name.clone();
             self.confirm = Some(Command::Rename(String::new()));
         }
-        for (i, (key, value)) in [
-            ("about.firmware", self.state.firmware.clone()),
-            ("about.connection", self.state.transport.clone()),
-        ]
-        .iter()
-        .enumerate()
+        txt(
+            ui,
+            rect(p.x + 22., p.y + 130., w - 44., 20.),
+            self.t("about.firmware"),
+            12.,
+            MUTED,
+            false,
+        );
+        txt(
+            ui,
+            rect(p.x + 22., p.y + 151., w - 44., 25.),
+            if self.state.firmware.is_empty() {
+                "—"
+            } else {
+                &self.state.firmware
+            },
+            15.,
+            INK,
+            false,
+        );
+        let action_width = (w - 52.) * 0.5;
+        if button(
+            ui,
+            "firmware.check",
+            rect(p.x + 22., p.y + 187., action_width, 34.),
+            &self.t(if self.firmware_result.is_some() {
+                "firmware.checking"
+            } else {
+                "firmware.check"
+            }),
+            false,
+            self.firmware_identity.is_some() && self.firmware_result.is_none(),
+        )
+        .clicked()
         {
-            let y = p.y + 77. + i as f32 * 42.;
+            self.check_firmware(ui.ctx());
+        }
+        if button(
+            ui,
+            "firmware.usb",
+            rect(p.x + 30. + action_width, p.y + 187., action_width, 34.),
+            &self.t("firmware.usb"),
+            false,
+            true,
+        )
+        .on_hover_text(self.t("firmware.usbHint"))
+        .clicked()
+            && crate::firmware::open_official_updater().is_err()
+        {
+            self.error = Some((self.t("firmware.openFailed"), Instant::now()));
+        }
+        let status = match &self.firmware_status {
+            FirmwareStatus::Idle | FirmwareStatus::Checking => None,
+            FirmwareStatus::Available(version) => {
+                Some((self.t("firmware.available").replace("{0}", version), ACCENT))
+            }
+            FirmwareStatus::NoUpdate => Some((self.t("firmware.none"), MUTED)),
+            FirmwareStatus::Failed => {
+                Some((self.t("firmware.failed"), Color32::from_rgb(180, 65, 65)))
+            }
+        };
+        if let Some((status, color)) = status {
             txt(
                 ui,
-                rect(p.x + 22., y, 150., 25.),
-                self.t(key),
-                13.,
-                MUTED,
-                false,
-            );
-            txt(
-                ui,
-                rect(p.x + 200., y, w - 222., 25.),
-                if value.is_empty() { "—" } else { value },
-                13.,
-                INK,
+                rect(p.x + 22., p.y + 231., w - 44., 24.),
+                status,
+                11.,
+                color,
                 false,
             );
         }
+        txt(
+            ui,
+            rect(p.x + 22., p.y + 264., w - 44., 20.),
+            self.t("about.connection"),
+            12.,
+            MUTED,
+            false,
+        );
+        txt(
+            ui,
+            rect(p.x + 22., p.y + 285., w - 44., 25.),
+            if self.state.transport.is_empty() {
+                "—"
+            } else {
+                &self.state.transport
+            },
+            14.,
+            INK,
+            false,
+        );
         ui.painter().line_segment(
-            [pos2(p.x + 22., p.y + 169.), pos2(p.x + w - 22., p.y + 169.)],
+            [pos2(p.x + 22., p.y + 327.), pos2(p.x + w - 22., p.y + 327.)],
             Stroke::new(1.0_f32, LINE),
         );
         txt(
             ui,
-            rect(p.x + 22., p.y + 190., 160., 26.),
+            rect(p.x + 22., p.y + 350., 110., 25.),
             self.t("language.title"),
-            15.,
+            14.,
             INK,
             true,
         );
@@ -1569,24 +2029,25 @@ impl Dashboard {
                 .map_or(self.language.preference.clone(), |p| p.native_name.clone())
         };
         let mut choice = self.language.preference.clone();
+        let combo_width = w - 152.;
         ui.allocate_new_ui(
-            UiBuilder::new().max_rect(rect(p.x + 200., p.y + 183., w - 222., 52.)),
+            UiBuilder::new().max_rect(rect(p.x + 130., p.y + 340., combo_width, 42.)),
             |ui| {
-                ui.spacing_mut().button_padding = vec2(14., 10.);
+                ui.spacing_mut().button_padding = vec2(12., 9.);
                 let visuals = ui.visuals_mut();
                 for widget in [
                     &mut visuals.widgets.inactive,
                     &mut visuals.widgets.hovered,
                     &mut visuals.widgets.active,
                 ] {
-                    widget.rounding = Rounding::same(12.);
+                    widget.rounding = Rounding::same(4.);
                     widget.bg_stroke = Stroke::NONE;
                 }
-                visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(245, 246, 250);
+                visuals.widgets.inactive.weak_bg_fill = BG;
                 visuals.widgets.hovered.weak_bg_fill = PALE;
                 ComboBox::from_id_salt("language")
                     .selected_text(selected)
-                    .width(230.)
+                    .width(combo_width - 24.)
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             &mut choice,
@@ -1606,14 +2067,14 @@ impl Dashboard {
         }
         txt(
             ui,
-            rect(p.x + 22., p.y + 230., w - 44., 20.),
+            rect(p.x + 22., p.y + 394., w - 44., 18.),
             format!("{} {}", crate::APP_NAME, crate::APP_VERSION),
             11.,
             MUTED,
             false,
         );
-        let p = if wide { pos2(p.x + w + 20., p.y) } else { p };
-        let w = if wide { full_width - w - 20. } else { w };
+        let p = pos2(p.x + w + 16., p.y);
+        let w = width - w - 16.;
         for (i, (title, description, action)) in [
             (
                 "diagnostics.title",
@@ -1626,11 +2087,11 @@ impl Dashboard {
         .iter()
         .enumerate()
         {
-            let y = p.y + if wide { 0. } else { 270. } + i as f32 * 90.;
-            card(ui, rect(p.x, y, w, 80.));
+            let y = p.y + i as f32 * 144.;
+            card(ui, rect(p.x, y, w, 132.));
             txt(
                 ui,
-                rect(p.x + 22., y + 17., w - 218., 26.),
+                rect(p.x + 22., y + 18., w - 44., 26.),
                 self.t(title),
                 16.,
                 INK,
@@ -1638,7 +2099,7 @@ impl Dashboard {
             );
             txt(
                 ui,
-                rect(p.x + 22., y + 48., w - 218., 26.),
+                rect(p.x + 22., y + 49., w - 44., 34.),
                 self.t(description),
                 12.,
                 MUTED,
@@ -1647,7 +2108,7 @@ impl Dashboard {
             if button(
                 ui,
                 ("about", i),
-                rect(p.x + w - 164., y + 25., 142., 36.),
+                rect(p.x + 22., y + 89., 146., 30.),
                 &self.t(action),
                 false,
                 i != 1 || self.state.connected,
@@ -1721,6 +2182,7 @@ impl eframe::App for Dashboard {
             }
         }
         self.events(ctx);
+        self.firmware_events();
         self.quitting |= self.tray.as_ref().is_some_and(|tray| tray.quitting());
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.quitting || self.tray.is_none() {

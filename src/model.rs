@@ -28,11 +28,19 @@ pub enum DeviceAction {
     Connect,
     Disconnect,
 }
+#[derive(Copy, Clone, Debug)]
+pub enum ConnectivitySetting {
+    Multipoint,
+    LeAudio,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct State {
     pub connected: bool,
     pub name: String,
     pub firmware: String,
+    pub product_id: Option<u16>,
+    #[serde(skip)]
+    pub product_guid: String,
     pub battery: Option<u8>,
     pub charging: Option<bool>,
     pub mode: u8,
@@ -45,6 +53,7 @@ pub struct State {
     pub favorites: u8,
     pub total_modes: u8,
     pub multipoint: Option<bool>,
+    pub le_audio: Option<bool>,
     pub pause: Option<bool>,
     pub answer: Option<bool>,
     pub sidetone: Option<u8>,
@@ -60,6 +69,8 @@ impl Default for State {
             connected: false,
             name: String::new(),
             firmware: String::new(),
+            product_id: None,
+            product_guid: String::new(),
             battery: None,
             charging: None,
             mode: 255,
@@ -75,6 +86,7 @@ impl Default for State {
             favorites: 0,
             total_modes: 11,
             multipoint: None,
+            le_audio: None,
             pause: None,
             answer: None,
             sidetone: None,
@@ -105,7 +117,11 @@ pub enum Command {
     Mode(u8),
     Spatial(u8),
     Wind(bool),
-    Multipoint(bool),
+    Connectivity {
+        setting: ConnectivitySetting,
+        enabled: bool,
+        revision: u64,
+    },
     Pause(bool),
     Answer(bool),
     Sidetone(u8),
@@ -121,11 +137,13 @@ pub enum Command {
 }
 #[derive(Clone, Debug)]
 pub enum Event {
+    Connecting,
     State(Box<State>),
     Ack(Edit, i32),
     ResetAck(Vec<Edit>),
     DeviceAck(String, DeviceAction),
     DeviceFailed(String, DeviceAction),
+    ConnectivityDone(u64),
     Failed(Option<Edit>, String),
     Rejected(Option<Edit>),
     Disconnected(String),
@@ -136,12 +154,14 @@ pub enum Event {
 pub struct Queue {
     pub commands: VecDeque<(Command, Instant)>,
     pub stopped: bool,
+    pub connecting: bool,
 }
 impl Queue {
     pub fn new() -> Self {
         Self {
             commands: VecDeque::new(),
             stopped: false,
+            connecting: true,
         }
     }
     pub fn push(&mut self, command: Command, now: Instant, immediate: bool) {

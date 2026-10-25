@@ -1,5 +1,5 @@
 use crate::model::Event;
-use anyhow::{ensure, Result};
+use anyhow::{bail, ensure, Result};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -32,8 +32,11 @@ impl Instance {
     pub fn acquire() -> Result<Option<Self>> {
         for attempt in 0..2 {
             unsafe {
-                // Share the legacy mutex to prevent parallel Bluetooth sessions.
-                let handle = CreateMutexW(None, false, w!(r"Local\QuietRebellion.Tray"))?;
+                if FindWindowW(TRAY_CLASS, None).is_ok() {
+                    signal(true)?;
+                    return Ok(None);
+                }
+                let handle = CreateMutexW(None, false, w!(r"Local\BoseHeadphoneControl.Tray"))?;
                 if GetLastError() == ERROR_ALREADY_EXISTS {
                     let _ = CloseHandle(handle);
                     match signal(true) {
@@ -69,19 +72,7 @@ fn signal_message(message: u32) -> Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    // Older installations receive named events instead of window messages.
-    unsafe {
-        let name = if message == OPEN_APP {
-            w!(r"Local\QuietRebellion.Show")
-        } else {
-            w!(r"Local\QuietRebellion.Quit")
-        };
-        let event = OpenEventW(EVENT_MODIFY_STATE, false, name)?;
-        let result = SetEvent(event);
-        let _ = CloseHandle(event);
-        result?;
-    }
-    Ok(())
+    bail!("Bose Headphone Control tray is unavailable")
 }
 
 struct TrayState {
