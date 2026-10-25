@@ -6,6 +6,16 @@ A Windows app for controlling Bose QuietComfort headphones.
 
 ![Headphone controls](docs/screenshot.png)
 
+The Controls page puts noise control, equalizer, immersive audio and wind reduction in one view. See the other pages in the app:
+
+<details>
+<summary>Devices, Headphones and About</summary>
+
+![Connected devices](docs/screenshot-devices.png)
+![Headphone settings](docs/screenshot-settings.png)
+![About headphones](docs/screenshot-about.png)
+</details>
+
 ## Features
 
 - Listening modes, noise cancellation, three-band equalizer, immersive audio and wind reduction.
@@ -24,7 +34,7 @@ Tested with **Bose QuietComfort Ultra Headphones (2nd Gen)**. Other models are u
 
 ## Use
 
-Download the Windows x64 ZIP from [Releases](../../releases/latest), extract it, and run `bose-headphone-control.exe`.
+Download the Windows x64 executable from [Releases](../../releases/latest) and run it directly. A ZIP containing the executable and `LICENSE` is also available.
 
 Requires Windows 10/11, a Bluetooth adapter and headphones paired in Windows Settings. Run `bose-headphone-control.exe` to connect.
 

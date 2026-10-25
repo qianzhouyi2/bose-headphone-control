@@ -60,6 +60,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          $executable = "Bose-Headphone-Control-$env:APP_VERSION-windows-x64.exe"
+          Copy-Item -LiteralPath 'target/x86_64-pc-windows-msvc/release/bose-headphone-control.exe' -Destination (Join-Path artifacts $executable)
           $filename = "Bose-Headphone-Control-$env:APP_VERSION-windows-x64.zip"
           $archive = Join-Path artifacts $filename
           Compress-Archive -LiteralPath 'target/x86_64-pc-windows-msvc/release/bose-headphone-control.exe', 'LICENSE' -DestinationPath $archive -Force
@@ -70,8 +72,10 @@ jobs:
               throw 'The ZIP must contain only the executable and LICENSE at its root.'
             }
           } finally { $zip.Dispose() }
-          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $filename" | Set-Content -LiteralPath artifacts/SHA256SUMS.txt -Encoding ascii
+          $exeHash = (Get-FileHash -LiteralPath (Join-Path artifacts $executable) -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zipHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $hashes = @("$exeHash  $executable", "$zipHash  $filename")
+          $hashes | Set-Content -LiteralPath artifacts/SHA256SUMS.txt -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
           name: release-windows-x64
@@ -103,6 +107,6 @@ jobs:
             gh release create "$RELEASE_TAG" artifacts/* \
               --verify-tag \
               --title "Bose Headphone Control $APP_VERSION" \
-              --notes "Windows x64 portable build. Extract the ZIP and run bose-headphone-control.exe." \
+              --notes "Windows x64 portable build. Download and run the EXE directly, or extract the ZIP and run bose-headphone-control.exe." \
               --latest
           fi

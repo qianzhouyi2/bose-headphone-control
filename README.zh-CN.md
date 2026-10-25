@@ -6,6 +6,16 @@
 
 ![耳机控制界面](docs/screenshot.zh-CN.png)
 
+「耳机控制」页面集中展示降噪、均衡器、沉浸式音频和抗风噪。应用中的其他页面：
+
+<details>
+<summary>连接设备、耳机设置和关于耳机</summary>
+
+![连接设备](docs/screenshot-devices.zh-CN.png)
+![耳机设置](docs/screenshot-settings.zh-CN.png)
+![关于耳机](docs/screenshot-about.zh-CN.png)
+</details>
+
 ## 功能
 
 - 聆听模式、降噪、三段均衡器、沉浸式音频和抗风噪。
@@ -24,7 +34,7 @@
 
 ## 使用
 
-从 [Releases](../../releases/latest) 下载 Windows x64 压缩包，解压后运行 `bose-headphone-control.exe`。
+从 [Releases](../../releases/latest) 下载 Windows x64 可执行文件后直接运行，也可以下载包含程序和 `LICENSE` 的压缩包。
 
 需要 Windows 10/11、蓝牙适配器，以及已在 Windows 设置中完成配对的耳机。运行 `bose-headphone-control.exe` 后自动连接。
 
