@@ -82,8 +82,10 @@ impl Worker {
             let mut address = None;
             let mut next_poll = Instant::now();
             let mut next_source_poll = Instant::now();
+            let mut next_devices_poll = Instant::now();
             let mut retry = Instant::now();
             let mut failures = 0u32;
+            let mut poll_failures = 0u32;
             let mut suspended = false;
             loop {
                 let command = {
@@ -133,7 +135,9 @@ impl Worker {
                             connection = Some(conn);
                             next_poll = Instant::now() + Duration::from_secs(5);
                             next_source_poll = Instant::now() + Duration::from_secs(1);
+                            next_devices_poll = Instant::now() + Duration::from_secs(15);
                             failures = 0;
+                            poll_failures = 0;
                         }
                         Err(e) => {
                             if cancel_worker.load(Ordering::Relaxed) {
@@ -160,6 +164,7 @@ impl Worker {
                         let confirmed_before = conn.state.clone();
                         match conn.execute(&command) {
                             Ok(value) => {
+                                poll_failures = 0;
                                 publish(&tx, &conn.state, &ctx);
                                 match &command {
                                     Command::ConnectDevice(address) => {
@@ -273,29 +278,59 @@ impl Worker {
                     && pair.0.lock().unwrap().commands.is_empty()
                 {
                     let full_poll = Instant::now() >= next_poll;
+                    let refresh_devices = full_poll && Instant::now() >= next_devices_poll;
                     let result = if full_poll {
-                        connection.as_mut().unwrap().poll()
+                        connection
+                            .as_mut()
+                            .unwrap()
+                            .poll_with_devices(refresh_devices)
                     } else {
                         connection.as_mut().unwrap().source()
                     };
+                    if refresh_devices {
+                        next_devices_poll = Instant::now() + Duration::from_secs(15);
+                    }
+                    let mut keep_session = false;
                     match result {
-                        Ok(()) => publish(&tx, &connection.as_ref().unwrap().state, &ctx),
+                        Ok(()) => {
+                            poll_failures = 0;
+                            publish(&tx, &connection.as_ref().unwrap().state, &ctx)
+                        }
                         Err(e) => {
                             if cancel_worker.load(Ordering::Relaxed) {
                                 break;
                             }
                             log(&format!("Poll: {e:#}"));
-                            connection = None;
-                            pair.0.lock().unwrap().clear_device_edits();
-                            let _ = tx.send(Event::Disconnected(e.to_string()));
-                            ctx.request_repaint();
-                            retry = Instant::now() + Duration::from_secs(5);
+                            if e.to_string().contains("timed out") && poll_failures < 2 {
+                                poll_failures += 1;
+                                keep_session = true;
+                                log(&format!(
+                                    "Keeping Bluetooth control session after transient poll failure ({poll_failures}/2)"
+                                ));
+                            } else {
+                                poll_failures = 0;
+                                connection = None;
+                                pair.0.lock().unwrap().clear_device_edits();
+                                let _ = tx.send(Event::Disconnected(e.to_string()));
+                                ctx.request_repaint();
+                                retry = Instant::now() + Duration::from_secs(5);
+                            }
                         }
                     }
                     if full_poll {
-                        next_poll = Instant::now() + Duration::from_secs(5);
+                        next_poll = Instant::now()
+                            + if keep_session {
+                                Duration::from_secs(2)
+                            } else {
+                                Duration::from_secs(5)
+                            };
                     }
-                    next_source_poll = Instant::now() + Duration::from_secs(1);
+                    next_source_poll = Instant::now()
+                        + if keep_session {
+                            Duration::from_secs(2)
+                        } else {
+                            Duration::from_secs(1)
+                        };
                 }
             }
             drop(connection);

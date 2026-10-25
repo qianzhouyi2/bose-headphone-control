@@ -158,7 +158,13 @@ impl Connection {
                 })?
             }
         };
-        connection.output = crate::audio::OutputMonitor::new(address).ok();
+        connection.output = match crate::audio::OutputMonitor::new(address) {
+            Ok(output) => Some(output),
+            Err(error) => {
+                log::warn!("Windows audio output monitor unavailable: {error:#}");
+                None
+            }
+        };
         connection.update_output();
         Ok((connection, address))
     }
@@ -192,11 +198,36 @@ impl Connection {
     }
 
     fn connect_gatt(address: u64) -> Result<Self> {
+        let mut last_error = None;
+        for (attempt, cache_mode) in [BluetoothCacheMode::Cached, BluetoothCacheMode::Uncached]
+            .into_iter()
+            .enumerate()
+        {
+            if attempt > 0 {
+                check_cancelled()?;
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            match Self::connect_gatt_with_cache(address, cache_mode) {
+                Ok(connection) => return Ok(connection),
+                Err(error) => {
+                    if attempt == 0 {
+                        log::warn!(
+                            "BLE/GATT cached connection failed ({error:#}); retrying with uncached discovery"
+                        );
+                    }
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("BLE/GATT connection failed")))
+    }
+
+    fn connect_gatt_with_cache(address: u64, cache_mode: BluetoothCacheMode) -> Result<Self> {
         let device = wait(BluetoothLEDevice::FromBluetoothAddressAsync(address)?, 10)?;
         let services = match wait(
             device.GetGattServicesForUuidWithCacheModeAsync(
                 GUID::from_u128(0x0000febe_0000_1000_8000_00805f9b34fb),
-                BluetoothCacheMode::Cached,
+                cache_mode,
             )?,
             10,
         ) {
@@ -207,15 +238,13 @@ impl Connection {
             }
         };
         if services.Status()? != GattCommunicationStatus::Success {
+            let status = services.Status()?;
             let _ = device.Close();
-            bail!("Bluetooth services unavailable");
+            bail!("Bluetooth services unavailable ({status:?}, cache mode {cache_mode:?})");
         }
         let mut chosen = None;
         for service in services.Services()? {
-            let result = wait(
-                service.GetCharacteristicsWithCacheModeAsync(BluetoothCacheMode::Cached)?,
-                8,
-            )?;
+            let result = wait(service.GetCharacteristicsWithCacheModeAsync(cache_mode)?, 8)?;
             if result.Status()? == GattCommunicationStatus::Success {
                 let mut fallback = None;
                 for c in result.Characteristics()? {
@@ -283,7 +312,12 @@ impl Connection {
         if status != GattCommunicationStatus::Success {
             let _ = characteristic.RemoveValueChanged(token);
             let _ = session.SetMaintainConnection(false);
-            bail!("Could not subscribe to headphone notifications");
+            let _ = session.Close();
+            let _ = service.Close();
+            let _ = device.Close();
+            bail!(
+                "Could not subscribe to headphone notifications ({status:?}, cache mode {cache_mode:?})"
+            );
         }
         let name = device.Name()?.to_string();
         let mut conn = Self {
@@ -397,6 +431,13 @@ impl Connection {
     }
     fn start(&mut self, b: u8, f: u8, p: &[u8]) -> Result<()> {
         let r = self.request(b, f, 5, p, false)?.remove(0);
+        status(r, 0)?;
+        Ok(())
+    }
+    fn start_with_timeout(&mut self, b: u8, f: u8, p: &[u8], timeout: Duration) -> Result<()> {
+        let r = self
+            .request_with_timeout(b, f, 5, p, false, timeout)?
+            .remove(0);
         status(r, 0)?;
         Ok(())
     }
@@ -541,9 +582,12 @@ impl Connection {
                 }
             }
         }
-        self.poll()
+        self.poll_with_devices(true)
     }
     pub fn poll(&mut self) -> Result<()> {
+        self.poll_with_devices(false)
+    }
+    pub fn poll_with_devices(&mut self, refresh_devices: bool) -> Result<()> {
         let p = self.get(2, 2, 1)?;
         ensure!(p[0] <= 100, "Invalid battery value");
         self.state.battery = Some(p[0]);
@@ -564,8 +608,11 @@ impl Connection {
         if self.state.sidetone.is_some() {
             self.state.sidetone = Some(self.get(1, 11, 2)?[1]);
         }
-        self.refresh_devices()?;
-        Ok(())
+        if refresh_devices {
+            self.refresh_devices()
+        } else {
+            self.source()
+        }
     }
     pub fn source(&mut self) -> Result<()> {
         let p = self.get(5, 1, 3)?;
@@ -735,15 +782,43 @@ impl Connection {
             }
             Command::ConnectDevice(address) => {
                 let target = mac_bytes(address)?;
-                let mut p = vec![0];
-                p.extend_from_slice(&target);
-                let response =
-                    self.request_with_timeout(4, 1, 5, &p, false, Duration::from_secs(20))?;
-                let reply = status(response.into_iter().next().unwrap(), 7)?;
-                ensure!(reply[..6] == target[..], "Unexpected connected device");
+                let deadline = Instant::now() + Duration::from_secs(20);
+                let mut routed = false;
+                for attempt in 0..5 {
+                    if attempt > 0 {
+                        check_cancelled()?;
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    let mut payload = Vec::with_capacity(7);
+                    payload.push(0x82);
+                    payload.extend_from_slice(&target);
+                    match self.start_with_timeout(
+                        4,
+                        12,
+                        &payload,
+                        remaining.min(Duration::from_secs(4)),
+                    ) {
+                        Ok(()) => {
+                            routed = true;
+                            break;
+                        }
+                        Err(error)
+                            if error
+                                .downcast_ref::<DeviceRejected>()
+                                .is_some_and(|rejection| rejection.code == 4) =>
+                        {
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 ensure!(
-                    reply[6] & 3 != 0 || reply.get(7).is_some_and(|b| b & 1 != 0),
-                    "The device did not establish an audio connection"
+                    routed,
+                    "The target device is not ready for audio switching; start playback on it and try again"
                 );
                 self.refresh_devices()?;
                 ensure!(
